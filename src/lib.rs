@@ -7,3 +7,4 @@ pub mod ops;
 pub use tensor::Tensor;
 pub use ops::outer::outer;
 pub use ops::contract::contract;
+pub use ops::covariant_derivative::covariant_derivative;
