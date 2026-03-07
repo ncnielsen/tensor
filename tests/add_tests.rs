@@ -57,6 +57,21 @@ fn test_mixed_tensor_addition() {
 
 #[test]
 #[serial]
+fn test_matrix_addition() {
+    // x = [[1, 2], [3, 4]], y = [[10, 20], [30, 40]]
+    // x + y = [[11, 22], [33, 44]]
+    let x: Tensor<2, 0> = Tensor::from_f64(2, vec![1.0, 2.0, 3.0, 4.0]);
+    let y: Tensor<2, 0> = Tensor::from_f64(2, vec![10.0, 20.0, 30.0, 40.0]);
+    let result = x + y;
+
+    assert_eq!(result.components[0].result, 11.0);
+    assert_eq!(result.components[1].result, 22.0);
+    assert_eq!(result.components[2].result, 33.0);
+    assert_eq!(result.components[3].result, 44.0);
+}
+
+#[test]
+#[serial]
 fn test_vector_addition_adjoint() {
     clear_tape();
 
