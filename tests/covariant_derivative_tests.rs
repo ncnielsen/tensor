@@ -3,22 +3,22 @@
 
 use serial_test::serial;
 use tensor::covariant_derivative;
+use tensor::Christoffel;
 use tensor::Tensor;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// 2-D zero Christoffel symbols (flat / Cartesian connection).
-fn zero_christoffel_2d() -> Tensor<1, 2> {
-    Tensor::from_f64(2, vec![0.0; 8])
+fn zero_christoffel_2d() -> Christoffel {
+    Christoffel::from_f64(2, vec![0.0; 8])
 }
 
 /// 2-D Christoffel with only Γ^0_{00} = 1, all other components zero.
 ///
-/// Tensor<1,2> layout: component(&[i, j, k]) = Γ^i_{jk}
-/// Flat order (row-major over [i, j, k] each in 0..2):
-///   flat 0 = Γ^0_{00} = 1, all others = 0.
-fn christoffel_upper0_00() -> Tensor<1, 2> {
-    Tensor::from_f64(2, vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+/// Layout: component(i, j, k) = Γ^i_{jk}, row-major over [i, j, k] in 0..2.
+/// Flat index 0 = Γ^0_{00} = 1, all others = 0.
+fn christoffel_upper0_00() -> Christoffel {
+    Christoffel::from_f64(2, vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

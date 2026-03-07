@@ -1,3 +1,4 @@
+use crate::christoffel::Christoffel;
 use crate::tensor::{decode_flat_index, Tensor};
 
 /// Covariant derivative of a tensor field.
@@ -21,7 +22,7 @@ use crate::tensor::{decode_flat_index, Tensor};
 pub fn covariant_derivative<const M: usize, const N: usize>(
     tensor: &Tensor<M, N>,
     partial_deriv: &Tensor<M, { N + 1 }>,
-    christoffel: &Tensor<1, 2>,
+    christoffel: &Christoffel,
 ) -> Tensor<M, { N + 1 }>
 where
     [(); N + 1]:,
@@ -35,7 +36,8 @@ where
     assert_eq!(
         tensor.dim, christoffel.dim,
         "Dimension mismatch between tensor and christoffel: {} vs {}",
-        tensor.dim, christoffel.dim
+        tensor.dim,
+        christoffel.dim
     );
 
     let dim = tensor.dim;
@@ -57,7 +59,7 @@ where
             for p in 0..M {
                 let ip = upper[p];
                 let mut iter = (0..dim).map(|l| {
-                    let gamma = christoffel.component(&[ip, k, l]);
+                    let gamma = christoffel.component(ip, k, l);
                     let mut t_idx: Vec<usize> = upper.to_vec();
                     t_idx[p] = l;
                     t_idx.extend_from_slice(lower);
@@ -72,7 +74,7 @@ where
             for q in 0..N {
                 let jq = lower[q];
                 let mut iter = (0..dim).map(|l| {
-                    let gamma = christoffel.component(&[l, k, jq]);
+                    let gamma = christoffel.component(l, k, jq);
                     let mut t_idx: Vec<usize> = upper.to_vec();
                     t_idx.extend_from_slice(lower);
                     t_idx[M + q] = l;
