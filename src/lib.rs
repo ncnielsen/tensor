@@ -14,3 +14,5 @@ pub use ops::contract::contract;
 pub use ops::covariant_derivative::covariant_derivative;
 pub use ops::riemann::riemann;
 pub use ops::ricci_tensor::ricci_tensor;
+pub use ops::ricci_scalar::ricci_scalar;
+pub use ops::einstein_tensor::einstein_tensor;
