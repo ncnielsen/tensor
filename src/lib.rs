@@ -13,3 +13,4 @@ pub use ops::outer::outer;
 pub use ops::contract::contract;
 pub use ops::covariant_derivative::covariant_derivative;
 pub use ops::riemann::riemann;
+pub use ops::ricci_tensor::ricci_tensor;
