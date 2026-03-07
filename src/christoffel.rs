@@ -1,6 +1,6 @@
 use aad::number::Number;
 
-use crate::tensor::flat_index;
+use crate::tensor::{flat_index, Tensor};
 
 /// Christoffel symbols of the second kind, Γ^i_{jk}.
 ///
@@ -68,6 +68,61 @@ impl Christoffel {
     /// Convenience constructor from plain `f64` values (wraps each as a leaf `Number`).
     pub fn from_f64(dim: usize, values: Vec<f64>) -> Self {
         let components = values.into_iter().map(Number::new).collect();
+        Self::new(dim, components)
+    }
+
+    /// Compute Christoffel symbols from a metric tensor and its partial derivatives.
+    ///
+    /// Uses the Levi-Civita formula:
+    ///   Γ^k_{ij} = ½ g^{kl} (∂_i g_{jl} + ∂_j g_{il} − ∂_l g_{ij})
+    ///
+    /// Arguments:
+    ///   - `g`         — covariant metric tensor g_{ij}           (Tensor<0,2>)
+    ///   - `g_inv`     — contravariant inverse metric g^{ij}      (Tensor<2,0>)
+    ///   - `partial_g` — partial derivatives of the metric        (Tensor<0,3>)
+    ///                   layout [i, j, k]: component(&[i,j,k]) = ∂_k g_{ij}
+    ///
+    /// Panics if dimensions do not all match.
+    pub fn from_metric(
+        g: &Tensor<0, 2>,
+        g_inv: &Tensor<2, 0>,
+        partial_g: &Tensor<0, 3>,
+    ) -> Self {
+        assert_eq!(
+            g.dim, g_inv.dim,
+            "Dimension mismatch: g ({}) vs g_inv ({})",
+            g.dim, g_inv.dim
+        );
+        assert_eq!(
+            g.dim, partial_g.dim,
+            "Dimension mismatch: g ({}) vs partial_g ({})",
+            g.dim, partial_g.dim
+        );
+
+        let dim = g.dim;
+        assert!(dim >= 1, "Dimension must be at least 1");
+
+        // Build components in row-major layout [k, i, j] = Γ^k_{ij}
+        let mut components = Vec::with_capacity(dim.pow(3));
+        for k in 0..dim {
+            for i in 0..dim {
+                for j in 0..dim {
+                    // Γ^k_{ij} = ½ Σ_l g^{kl} (∂_i g_{jl} + ∂_j g_{il} − ∂_l g_{ij})
+                    let mut iter = (0..dim).map(|l| {
+                        let g_kl    = g_inv.component(&[k, l]);
+                        let d_i_gjl = partial_g.component(&[j, l, i]);
+                        let d_j_gil = partial_g.component(&[i, l, j]);
+                        let d_l_gij = partial_g.component(&[i, j, l]);
+                        g_kl * (d_i_gjl + d_j_gil - d_l_gij)
+                    });
+                    let first = iter.next().unwrap();
+                    let sum = iter.fold(first, |acc, x| acc + x);
+                    components.push(sum * 0.5);
+                }
+            }
+        }
+
+        // Self::new validates the lower-index symmetry
         Self::new(dim, components)
     }
 
