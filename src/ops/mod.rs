@@ -5,6 +5,7 @@ pub mod einstein_tensor;
 pub mod em_stress_energy;
 pub mod faraday;
 pub mod outer;
+pub mod partial_deriv;
 pub mod ricci_scalar;
 pub mod ricci_tensor;
 pub mod riemann;
