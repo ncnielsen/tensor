@@ -20,3 +20,4 @@ pub use ops::faraday::faraday;
 pub use ops::em_stress_energy::em_stress_energy;
 pub use ops::partial_deriv::partial_deriv;
 pub use ops::partial_deriv::christoffel_partial_deriv;
+pub use ops::einstein_residual::einstein_residual;

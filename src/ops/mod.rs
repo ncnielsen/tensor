@@ -1,6 +1,7 @@
 pub mod add;
 pub mod contract;
 pub mod covariant_derivative;
+pub mod einstein_residual;
 pub mod einstein_tensor;
 pub mod em_stress_energy;
 pub mod faraday;
