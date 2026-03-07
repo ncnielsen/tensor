@@ -1,0 +1,10 @@
+[package]
+name = "tensor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aad = { path = "../automatic_adjoint_differentiation" }
+
+[dev-dependencies]
+serial_test = "3"
