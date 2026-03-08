@@ -1,4 +1,5 @@
 pub mod add;
+pub mod em_source;
 pub mod contract;
 pub mod covariant_derivative;
 pub mod einstein_residual;
