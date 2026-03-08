@@ -8,6 +8,8 @@ pub mod christoffel_derivative;
 pub mod solver;
 pub mod adm;
 pub mod adm_rhs;
+pub mod adm_grid;
+pub mod adm_step;
 
 pub use tensor::Tensor;
 pub use christoffel::Christoffel;
@@ -29,3 +31,5 @@ pub use solver::{solve_1d, solve_3d, invert_matrix, SolveResult, SolveResult3D};
 pub use ops::em_source::em_t_grid;
 pub use adm::{AdmState, ExtrinsicCurvature};
 pub use adm_rhs::{adm_rhs_geodesic, adm_rhs_vacuum, hamiltonian_constraint, k_squared, momentum_constraint, AdmRhs};
+pub use adm_grid::AdmGrid;
+pub use adm_step::{adm_step_rk4, geodesic_rhs, hamiltonian_l2};
