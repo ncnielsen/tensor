@@ -224,6 +224,37 @@ impl TornadoResult {
     }
 }
 
+// ── Result helpers ────────────────────────────────────────────────────────────
+
+impl TornadoResult {
+    /// Write all snapshots as CSV to `w`.
+    ///
+    /// Columns: step, t, hamiltonian_l2, k_trace_rms, k_offdiag_rms,
+    ///          gamma_perturb_rms, em_angular_momentum_z, max_em_rho
+    pub fn write_csv<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+        writeln!(
+            w,
+            "step,t,hamiltonian_l2,k_trace_rms,k_offdiag_rms,\
+             gamma_perturb_rms,em_angular_momentum_z,max_em_rho"
+        )?;
+        for s in &self.snapshots {
+            writeln!(
+                w,
+                "{},{},{},{},{},{},{},{}",
+                s.step,
+                s.t,
+                s.hamiltonian_l2,
+                s.k_trace_rms,
+                s.k_offdiag_rms,
+                s.gamma_perturb_rms,
+                s.em_angular_momentum_z,
+                s.max_em_rho,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 // ── Main runner ───────────────────────────────────────────────────────────────
 
 /// Run a tornado simulation from flat Minkowski initial data.
@@ -231,8 +262,14 @@ impl TornadoResult {
 /// The ring is placed at the physical centre of the grid.
 /// Flat initial data (γ = δ, K = 0) is used; the EM source drives curvature growth.
 ///
+/// `on_snapshot` is called with each recorded snapshot (including the initial
+/// step 0 and the final step), allowing the caller to print progress.
+///
 /// Returns snapshots at every `config.output_every` steps plus the final grid.
-pub fn run_tornado(config: &TornadoConfig) -> TornadoResult {
+pub fn run_tornado_cb<F: FnMut(&TornadoSnapshot)>(
+    config: &TornadoConfig,
+    mut on_snapshot: F,
+) -> TornadoResult {
     // Physical centre of the grid
     let cx = config.nx as f64 * config.dx / 2.0;
     let cy = config.ny as f64 * config.dy / 2.0;
@@ -265,6 +302,7 @@ pub fn run_tornado(config: &TornadoConfig) -> TornadoResult {
         // Record diagnostics at output steps
         if step % config.output_every == 0 || step == config.n_steps {
             let snap = compute_diagnostics(&grid, &matters, step, config.dt);
+            on_snapshot(&snap);
             snapshots.push(snap);
         }
 
@@ -275,4 +313,11 @@ pub fn run_tornado(config: &TornadoConfig) -> TornadoResult {
     }
 
     TornadoResult { snapshots, final_grid: grid }
+}
+
+/// Run a tornado simulation from flat Minkowski initial data.
+///
+/// Convenience wrapper around [`run_tornado_cb`] with a no-op callback.
+pub fn run_tornado(config: &TornadoConfig) -> TornadoResult {
+    run_tornado_cb(config, |_| {})
 }

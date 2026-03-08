@@ -155,18 +155,22 @@ fn test_tornado_sim_full_run() {
 
     result.print_summary();
 
-    // Rotation should be sourced
+    // K_offdiag should grow — the rotating EM source seeds off-diagonal extrinsic curvature
     let peak_offdiag = result.peak_k_offdiag();
     assert!(
         peak_offdiag > 0.0,
         "K_offdiag should grow; peak = {peak_offdiag:.3e}"
     );
 
-    // EM angular momentum from the rotating source
-    let peak_jz = result.peak_em_angular_momentum_z();
+    // The spatial metric should deviate from flat (curvature is accumulating)
+    let peak_gp = result
+        .snapshots
+        .iter()
+        .map(|s| s.gamma_perturb_rms)
+        .fold(0.0_f64, f64::max);
     assert!(
-        peak_jz > 0.0,
-        "EM angular momentum should be non-zero; peak |J_z| = {peak_jz:.3e}"
+        peak_gp > 0.0,
+        "γ_perturb should grow; peak = {peak_gp:.3e}"
     );
 
     // Constraint should not blow up (stays below a generous threshold)
