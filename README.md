@@ -2,7 +2,7 @@
 
 A Rust library for Automatic Adjoint Differentiation (AAD) on general Tensors of rank (m, n).
 
-This crate provides a tensor type whose components are differentiable `Number` values, enabling automatic differentiation of arbitrary tensor expressions at no extra cost. Differentiation of any tensor expression is handled entirely by the companion [`aad`](../automatic_adjoint_differentiation) crate via reverse-mode adjoint propagation.
+This crate provides a tensor type whose components are differentiable `Number` values, enabling automatic differentiation of arbitrary tensor expressions at no extra cost. Differentiation of any tensor expression is handled entirely by the companion [`aad`](https://github.com/ncnielsen/automatic_adjoint_differentiation) crate via reverse-mode adjoint propagation.
 
 ---
 
