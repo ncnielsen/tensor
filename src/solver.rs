@@ -1,6 +1,20 @@
+use aad::automatic_differentiator::AutomaticDifferentiator;
+use aad::number::Number;
 use crate::ops::einstein_residual::einstein_residual;
 use crate::ops::newton_step::newton_step;
 use crate::tensor::Tensor;
+
+/// Clear the global AAD tape.
+///
+/// The solver uses `einstein_residual` purely for its `f64` output (.result).
+/// Tensor arithmetic registers operations on the global tape, which is never
+/// consumed (we never call `reverse_propagate_adjoints`).  Clearing after each
+/// residual evaluation prevents the tape from growing unboundedly across the
+/// thousands of Number operations in a single solve.
+fn clear_tape() {
+    let arg = Number::new(0.0);
+    AutomaticDifferentiator::new().derivatives(|_| Number::new(0.0), &[arg]);
+}
 
 /// Invert a dim×dim matrix stored row-major as a flat `Vec<f64>`.
 ///
@@ -75,7 +89,7 @@ fn symmetrize(g: &mut [f64], dim: usize) {
     }
 }
 
-// ─── Public result type ────────────────────────────────────────────────────────
+// ─── Public result types ───────────────────────────────────────────────────────
 
 /// Returned by [`solve_1d`].
 pub struct SolveResult {
@@ -188,6 +202,7 @@ pub fn solve_1d(
             full.push(br.clone());
 
             // Residual at each interior point.
+            // clear_tape() is called after each point to prevent unbounded tape growth.
             (1..n_points - 1)
                 .flat_map(|i| {
                     let g_fn = |x: &[f64]| -> Tensor<0, 2> {
@@ -204,7 +219,7 @@ pub fn solve_1d(
                     let mut point = vec![0.0f64; dim];
                     point[0] = i as f64 * h;
 
-                    einstein_residual(
+                    let vals: Vec<f64> = einstein_residual(
                         &g_fn,
                         &g_inv_fn,
                         &t_grid[i],
@@ -215,7 +230,9 @@ pub fn solve_1d(
                     .components
                     .iter()
                     .map(|c| c.result)
-                    .collect::<Vec<_>>()
+                    .collect();
+                    clear_tape();
+                    vals
                 })
                 .collect()
         };
@@ -246,6 +263,208 @@ pub fn solve_1d(
 
     SolveResult {
         g_grid: grid,
+        iterations,
+        residual_norm,
+        converged,
+    }
+}
+
+// ─── 3-D solver ───────────────────────────────────────────────────────────────
+
+/// Returned by [`solve_3d`].
+pub struct SolveResult3D {
+    /// Metric at every grid point in row-major order.
+    /// Flat index of `(ix, iy, iz)` is `ix * ny * nz + iy * nz + iz`.
+    pub g_grid: Vec<Vec<f64>>,
+    /// Grid dimensions.
+    pub nx: usize,
+    pub ny: usize,
+    pub nz: usize,
+    /// Number of Newton-Raphson steps performed.
+    pub iterations: usize,
+    /// L∞ norm of the residual G_{μν} − κ T_{μν} at the final iterate.
+    pub residual_norm: f64,
+    /// `true` if `residual_norm < tol` was achieved within `max_iter` steps.
+    pub converged: bool,
+}
+
+/// Newton-Raphson solver for G_{μν} = κ T_{μν} on a uniform 3-D Cartesian grid.
+///
+/// # Grid layout
+///
+/// `nx × ny × nz` points.  Flat index of `(ix, iy, iz)` is
+/// `ix * ny * nz + iy * nz + iz`.  All six faces of the bounding box are
+/// Dirichlet boundary conditions (held fixed).  The `(nx−2)·(ny−2)·(nz−2)`
+/// interior points are the unknowns.
+///
+/// The metric at cell `(ix, iy, iz)` is evaluated at coordinate
+/// `xᵅ = (ix·h, iy·h, iz·h, 0, …)`.  Requires `dim ≥ 3`; any extra
+/// spacetime dimensions beyond the three spatial ones are held at zero
+/// (static solution).
+///
+/// # Algorithm — same as `solve_1d`, generalized to 3-D
+///
+/// Per outer iteration:
+/// 1. Symmetrize all interior metric values.
+/// 2. Recompute g_inv = g⁻¹ via Gauss-Jordan at every grid point.
+/// 3. Evaluate the residual vector (n_interior × dim² components).
+/// 4. If ‖ℛ‖∞ < `tol`, declare convergence and stop.
+/// 5. One Newton-Raphson step (numerical Jacobian + Gaussian elimination).
+///
+/// # Arguments
+///
+/// - `g_grid`  — initial metric `[nx·ny·nz]`, each entry has `dim²` components
+/// - `t_grid`  — stress-energy T_{μν} at each point, same flat indexing
+/// - `nx`, `ny`, `nz` — grid dimensions (each ≥ 3)
+/// - `h`       — uniform grid spacing (and FD step for derivatives)
+/// - `kappa`   — coupling constant 8πG/c⁴
+/// - `tol`     — convergence criterion
+/// - `max_iter`— maximum NR iterations before giving up
+/// - `eps`     — step size for the numerical Jacobian
+pub fn solve_3d(
+    g_grid: &[Vec<f64>],
+    t_grid: &[Tensor<0, 2>],
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    h: f64,
+    kappa: f64,
+    tol: f64,
+    max_iter: usize,
+    eps: f64,
+) -> SolveResult3D {
+    let n_points = nx * ny * nz;
+    assert_eq!(g_grid.len(), n_points, "g_grid must have nx*ny*nz entries");
+    assert_eq!(t_grid.len(), n_points, "t_grid must have nx*ny*nz entries");
+    assert!(nx >= 3 && ny >= 3 && nz >= 3, "Need ≥ 3 points per axis");
+
+    let dim2 = g_grid[0].len();
+    let dim = (dim2 as f64).sqrt() as usize;
+    assert_eq!(dim * dim, dim2, "Metric must have dim² components");
+    assert!(dim >= 3, "dim must be ≥ 3 for the 3-D spatial solver");
+
+    // Pre-enumerate interior cells in row-major order.
+    let interior: Vec<(usize, usize, usize)> = (1..nx - 1)
+        .flat_map(|ix| (1..ny - 1).flat_map(move |iy| (1..nz - 1).map(move |iz| (ix, iy, iz))))
+        .collect();
+
+    let identity: Vec<f64> = (0..dim2)
+        .map(|k| if k / dim == k % dim { 1.0 } else { 0.0 })
+        .collect();
+
+    let mut grid = g_grid.to_vec();
+    let mut iterations = 0usize;
+    let mut residual_norm = f64::INFINITY;
+    let mut converged = false;
+
+    // +1 so we always evaluate the residual after the last step.
+    for iter in 0..=max_iter {
+        // ── 1. Symmetrize interior ────────────────────────────────────────
+        for &(ix, iy, iz) in &interior {
+            symmetrize(&mut grid[ix * ny * nz + iy * nz + iz], dim);
+        }
+
+        // ── 2. g_inv at every grid point ──────────────────────────────────
+        let g_inv_grid: Vec<Vec<f64>> = grid
+            .iter()
+            .map(|g| invert_matrix(g, dim).unwrap_or_else(|| identity.clone()))
+            .collect();
+
+        // ── 3. Flatten interior unknowns ──────────────────────────────────
+        let x0: Vec<f64> = interior
+            .iter()
+            .flat_map(|&(ix, iy, iz)| grid[ix * ny * nz + iy * nz + iz].iter().copied())
+            .collect();
+
+        // ── Build residual closure ────────────────────────────────────────
+        let gi = g_inv_grid;
+        let grid_snap = grid.clone();
+        let interior_cl = interior.clone();
+
+        let residual_fn = move |g_interior: &[f64]| -> Vec<f64> {
+            // Flat-index helper (captures ny, nz via the move).
+            let fi = |ix: usize, iy: usize, iz: usize| ix * ny * nz + iy * nz + iz;
+
+            // Reconstruct full grid from interior unknowns.
+            let mut full = grid_snap.clone();
+            for (k, &(ix, iy, iz)) in interior_cl.iter().enumerate() {
+                let off = k * dim2;
+                let mut g = g_interior[off..off + dim2].to_vec();
+                symmetrize(&mut g, dim);
+                full[fi(ix, iy, iz)] = g;
+            }
+
+            // Residual at every interior point.
+            // clear_tape() after each point keeps the AAD tape bounded.
+            interior_cl
+                .iter()
+                .flat_map(|&(iix, iiy, iiz)| {
+                    let g_fn = |x: &[f64]| -> Tensor<0, 2> {
+                        let jx = ((x[0] / h).round() as usize).clamp(0, nx - 1);
+                        let jy = ((x[1] / h).round() as usize).clamp(0, ny - 1);
+                        let jz = ((x[2] / h).round() as usize).clamp(0, nz - 1);
+                        Tensor::from_f64(dim, full[fi(jx, jy, jz)].clone())
+                    };
+                    let g_inv_fn = |x: &[f64]| -> Tensor<2, 0> {
+                        let jx = ((x[0] / h).round() as usize).clamp(0, nx - 1);
+                        let jy = ((x[1] / h).round() as usize).clamp(0, ny - 1);
+                        let jz = ((x[2] / h).round() as usize).clamp(0, nz - 1);
+                        Tensor::from_f64(dim, gi[fi(jx, jy, jz)].clone())
+                    };
+
+                    let mut point = vec![0.0f64; dim];
+                    point[0] = iix as f64 * h;
+                    point[1] = iiy as f64 * h;
+                    point[2] = iiz as f64 * h;
+                    // point[3..] remain 0 (static solution)
+
+                    let vals: Vec<f64> = einstein_residual(
+                        &g_fn,
+                        &g_inv_fn,
+                        &t_grid[fi(iix, iiy, iiz)],
+                        &point,
+                        h,
+                        kappa,
+                    )
+                    .components
+                    .iter()
+                    .map(|c| c.result)
+                    .collect();
+                    clear_tape();
+                    vals
+                })
+                .collect()
+        };
+
+        // ── 4. Check convergence ──────────────────────────────────────────
+        let r = residual_fn(&x0);
+        residual_norm = r.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+
+        if residual_norm < tol {
+            converged = true;
+            break;
+        }
+
+        if iter == max_iter {
+            break;
+        }
+
+        // ── 5. Newton-Raphson step ────────────────────────────────────────
+        let x_new = newton_step(&residual_fn, &x0, eps);
+
+        for (k, &(ix, iy, iz)) in interior.iter().enumerate() {
+            let off = k * dim2;
+            grid[ix * ny * nz + iy * nz + iz] = x_new[off..off + dim2].to_vec();
+        }
+
+        iterations += 1;
+    }
+
+    SolveResult3D {
+        g_grid: grid,
+        nx,
+        ny,
+        nz,
         iterations,
         residual_norm,
         converged,

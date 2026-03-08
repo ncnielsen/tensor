@@ -23,4 +23,4 @@ pub use ops::partial_deriv::partial_deriv;
 pub use ops::partial_deriv::christoffel_partial_deriv;
 pub use ops::einstein_residual::einstein_residual;
 pub use ops::newton_step::newton_step;
-pub use solver::{solve_1d, invert_matrix, SolveResult};
+pub use solver::{solve_1d, solve_3d, invert_matrix, SolveResult, SolveResult3D};

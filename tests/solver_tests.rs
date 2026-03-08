@@ -2,7 +2,7 @@
 #![allow(incomplete_features)]
 
 use serial_test::serial;
-use tensor::{invert_matrix, solve_1d, Tensor};
+use tensor::{invert_matrix, solve_1d, solve_3d, Tensor};
 
 // ─── invert_matrix ────────────────────────────────────────────────────────────
 
@@ -144,4 +144,119 @@ fn test_solve_1d_boundaries_unchanged() {
         flat_2d(),
         "Right boundary must not change"
     );
+}
+
+// ─── solve_3d ─────────────────────────────────────────────────────────────────
+
+/// Flat Minkowski metric: diag(−1, 1, 1, 1).
+fn minkowski_4d() -> Vec<f64> {
+    vec![
+        -1.0, 0.0, 0.0, 0.0,
+         0.0, 1.0, 0.0, 0.0,
+         0.0, 0.0, 1.0, 0.0,
+         0.0, 0.0, 0.0, 1.0,
+    ]
+}
+
+/// Zero stress-energy tensor of dimension `dim`.
+fn zero_t4() -> Tensor<0, 2> {
+    Tensor::from_f64(4, vec![0.0; 16])
+}
+
+/// Flat Minkowski vacuum on a 3×3×3 grid (dim=4).
+///
+/// G = 0 everywhere, T = 0 everywhere → residual is identically zero.
+/// The solver must declare convergence after 0 NR steps.
+#[test]
+#[serial]
+fn test_solve_3d_flat_vacuum_converges_immediately() {
+    let (nx, ny, nz) = (3, 3, 3);
+    let n = nx * ny * nz;
+    let g_grid: Vec<Vec<f64>> = (0..n).map(|_| minkowski_4d()).collect();
+    let t_grid: Vec<Tensor<0, 2>> = (0..n).map(|_| zero_t4()).collect();
+
+    let result = solve_3d(&g_grid, &t_grid, nx, ny, nz, 1.0, 1.0, 1e-7, 5, 1e-5);
+
+    assert!(
+        result.converged,
+        "Flat Minkowski vacuum should converge immediately; residual = {}",
+        result.residual_norm
+    );
+    assert_eq!(result.iterations, 0, "No NR steps needed for flat vacuum");
+    assert!(result.residual_norm < 1e-7);
+}
+
+/// solve_3d preserves all 6 boundary faces.
+#[test]
+#[serial]
+fn test_solve_3d_boundaries_unchanged() {
+    let (nx, ny, nz) = (4, 4, 4);
+    let n = nx * ny * nz;
+    let g_grid: Vec<Vec<f64>> = (0..n).map(|_| minkowski_4d()).collect();
+    let t_grid: Vec<Tensor<0, 2>> = (0..n).map(|_| zero_t4()).collect();
+
+    let result = solve_3d(&g_grid, &t_grid, nx, ny, nz, 1.0, 1.0, 1e-7, 5, 1e-5);
+
+    let flat = |ix: usize, iy: usize, iz: usize| ix * ny * nz + iy * nz + iz;
+    let expected = minkowski_4d();
+
+    // Spot-check each face.
+    for iy in 0..ny {
+        for iz in 0..nz {
+            assert_eq!(result.g_grid[flat(0, iy, iz)], expected, "x-left face");
+            assert_eq!(result.g_grid[flat(nx - 1, iy, iz)], expected, "x-right face");
+        }
+    }
+    for ix in 0..nx {
+        for iz in 0..nz {
+            assert_eq!(result.g_grid[flat(ix, 0, iz)], expected, "y-left face");
+            assert_eq!(result.g_grid[flat(ix, ny - 1, iz)], expected, "y-right face");
+        }
+    }
+    for ix in 0..nx {
+        for iy in 0..ny {
+            assert_eq!(result.g_grid[flat(ix, iy, 0)], expected, "z-left face");
+            assert_eq!(result.g_grid[flat(ix, iy, nz - 1)], expected, "z-right face");
+        }
+    }
+}
+
+/// A 5×5×5 flat vacuum: all 27 interior points should converge immediately.
+#[test]
+#[serial]
+fn test_solve_3d_flat_vacuum_5x5x5() {
+    let (nx, ny, nz) = (5, 5, 5);
+    let n = nx * ny * nz;
+    let g_grid: Vec<Vec<f64>> = (0..n).map(|_| minkowski_4d()).collect();
+    let t_grid: Vec<Tensor<0, 2>> = (0..n).map(|_| zero_t4()).collect();
+
+    let result = solve_3d(&g_grid, &t_grid, nx, ny, nz, 1.0, 1.0, 1e-7, 5, 1e-5);
+
+    assert!(
+        result.converged,
+        "5×5×5 flat vacuum should converge; residual = {}",
+        result.residual_norm
+    );
+    assert!(result.residual_norm < 1e-7);
+
+    // Every interior metric should still be Minkowski.
+    let expected = minkowski_4d();
+    let flat = |ix: usize, iy: usize, iz: usize| ix * ny * nz + iy * nz + iz;
+    for ix in 1..nx - 1 {
+        for iy in 1..ny - 1 {
+            for iz in 1..nz - 1 {
+                for (k, (&got, &exp)) in result.g_grid[flat(ix, iy, iz)]
+                    .iter()
+                    .zip(expected.iter())
+                    .enumerate()
+                {
+                    assert!(
+                        (got - exp).abs() < 1e-6,
+                        "g[{},{},{}][{}] = {} (expected {})",
+                        ix, iy, iz, k, got, exp
+                    );
+                }
+            }
+        }
+    }
 }
