@@ -128,7 +128,7 @@ Tests within each test binary access the same global AAD tape and must run seque
 This crate is part of a broader effort to build scalable numerical solvers for Partial Differential Equations on coordinate-independent tensor expressions. It provides the differentiable tensor foundation upon which PDE solvers will be built.
 
 Related projects:
-- [`aad`](../automatic_adjoint_differentiation) — Automatic Adjoint Differentiation on scalars, the differentiation engine used by this crate
+- [`aad`](https://github.com/ncnielsen/automatic_adjoint_differentiation) — Automatic Adjoint Differentiation on scalars, the differentiation engine used by this crate
 
 ---
 
