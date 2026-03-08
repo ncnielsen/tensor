@@ -30,6 +30,10 @@ pub struct AdmGrid {
     pub dx: f64,
     pub dy: f64,
     pub dz: f64,
+    /// Physical coordinate of grid point (0,0,0).
+    pub x0: f64,
+    pub y0: f64,
+    pub z0: f64,
     /// Flat field storage: `fields[pt_flat * FIELDS_PER_PT + field_off]`.
     pub fields: Vec<f64>,
 }
@@ -78,7 +82,7 @@ impl AdmGrid {
             }
         }
 
-        AdmGrid { nx, ny, nz, dx, dy, dz, fields }
+        AdmGrid { nx, ny, nz, dx, dy, dz, x0, y0, z0, fields }
     }
 
     /// Flat Minkowski grid: γ = δ_{ij}, K = 0, α = 1, β = 0 everywhere.

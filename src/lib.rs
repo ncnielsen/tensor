@@ -12,6 +12,7 @@ pub mod adm_grid;
 pub mod adm_step;
 pub mod adm_matter;
 pub mod tornado;
+pub mod tornado_sim;
 
 pub use tensor::Tensor;
 pub use christoffel::Christoffel;
@@ -38,3 +39,4 @@ pub use adm_step::{adm_step_rk4, adm_step_rk4_with_source, geodesic_rhs,
                    geodesic_rhs_with_matter, hamiltonian_l2};
 pub use adm_matter::{AdmMatter, matter_dk_correction};
 pub use tornado::{EmSource, TornadoArray, tornado_matter_grid};
+pub use tornado_sim::{TornadoConfig, TornadoResult, TornadoSnapshot, run_tornado};

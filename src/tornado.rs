@@ -65,23 +65,33 @@ pub struct TornadoArray {
 }
 
 impl TornadoArray {
-    /// Construct a uniform ring of `n` sources.
+    /// Construct a uniform ring of `n` sources centred at `(cx, cy, cz)`.
     ///
     /// # Arguments
     /// - `n`         — number of sources
     /// - `radius`    — ring radius in coordinate units
+    /// - `cx, cy, cz`— physical centre of the ring
     /// - `sigma`     — Gaussian width of each source
     /// - `amplitude` — peak B field of each source
     /// - `period`    — time for one full rotation (one cycle through all sources)
-    pub fn new(n: usize, radius: f64, sigma: f64, amplitude: f64, period: f64) -> Self {
+    pub fn new(
+        n: usize,
+        radius: f64,
+        cx: f64,
+        cy: f64,
+        cz: f64,
+        sigma: f64,
+        amplitude: f64,
+        period: f64,
+    ) -> Self {
         assert!(n >= 2, "Need at least 2 sources for a meaningful ring");
         let sources = (0..n)
             .map(|k| {
                 let phi = 2.0 * std::f64::consts::PI * k as f64 / n as f64;
                 EmSource {
-                    cx: radius * phi.cos(),
-                    cy: radius * phi.sin(),
-                    cz: 0.0,
+                    cx: cx + radius * phi.cos(),
+                    cy: cy + radius * phi.sin(),
+                    cz,
                     amplitude,
                     sigma,
                 }
@@ -145,10 +155,9 @@ pub fn tornado_matter_grid(
             for iz in 0..grid.nz {
                 let matter = aad::no_tape(|| {
                     // Physical coordinates of this grid point.
-                    // (We use the flat index ordering ix,iy,iz for clarity.)
-                    let x = ix as f64 * grid.dx;
-                    let y = iy as f64 * grid.dy;
-                    let z = iz as f64 * grid.dz;
+                    let x = grid.x0 + ix as f64 * grid.dx;
+                    let y = grid.y0 + iy as f64 * grid.dy;
+                    let z = grid.z0 + iz as f64 * grid.dz;
                     let point = [x, y, z, 0.0_f64]; // 4D spacetime point (t=0 spatial slice)
 
                     // 3D spatial metric at this point.
