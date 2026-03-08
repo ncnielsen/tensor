@@ -6,12 +6,12 @@
 //! Runs a spacetime-tornado ADM simulation and writes diagnostics as CSV.
 //!
 //! Usage:
-//!   cargo run --release --bin tornado [amplitude] [n_sources] [n_steps] [output.csv]
+//!   cargo run --release --bin tornado [amplitude] [n_sources] [n_steps] [grid_n] [output.csv]
 //!
-//! Defaults: amplitude=0.01, n_sources=6, n_steps=50, output=stdout.
+//! Defaults: amplitude=0.01, n_sources=6, n_steps=50, grid_n=9, output=stdout.
 //!
 //! Example:
-//!   cargo run --release --bin tornado 0.01 6 200 results.csv
+//!   cargo run --release --bin tornado 0.01 6 200 13 results.csv
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -23,9 +23,18 @@ fn main() {
     let amplitude: f64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.01);
     let n_sources: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(6);
     let n_steps: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(50);
-    let out_path: Option<&str> = args.get(4).map(|s| s.as_str());
+    let grid_n: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(9);
+    let out_path: Option<&str> = args.get(5).map(|s| s.as_str());
 
-    let config = TornadoConfig::perturbative(amplitude, n_sources, n_steps);
+    let mut config = TornadoConfig::perturbative(amplitude, n_sources, n_steps);
+    // Override grid dimensions while keeping ring geometry relative to cell size
+    let dx = config.dx;
+    config.nx = grid_n;
+    config.ny = grid_n;
+    config.nz = grid_n;
+    config.dx = dx;
+    config.dy = dx;
+    config.dz = dx;
 
     eprintln!(
         "Tornado simulation: {}×{}×{} grid, {} steps, {} sources, amplitude={:.2e}",
