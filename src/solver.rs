@@ -1,20 +1,6 @@
-use aad::automatic_differentiator::AutomaticDifferentiator;
-use aad::number::Number;
 use crate::ops::einstein_residual::einstein_residual;
 use crate::ops::newton_step::newton_step;
 use crate::tensor::Tensor;
-
-/// Clear the global AAD tape.
-///
-/// The solver uses `einstein_residual` purely for its `f64` output (.result).
-/// Tensor arithmetic registers operations on the global tape, which is never
-/// consumed (we never call `reverse_propagate_adjoints`).  Clearing after each
-/// residual evaluation prevents the tape from growing unboundedly across the
-/// thousands of Number operations in a single solve.
-fn clear_tape() {
-    let arg = Number::new(0.0);
-    AutomaticDifferentiator::new().derivatives(|_| Number::new(0.0), &[arg]);
-}
 
 /// Invert a dim×dim matrix stored row-major as a flat `Vec<f64>`.
 ///
@@ -219,20 +205,20 @@ pub fn solve_1d(
                     let mut point = vec![0.0f64; dim];
                     point[0] = i as f64 * h;
 
-                    let vals: Vec<f64> = einstein_residual(
-                        &g_fn,
-                        &g_inv_fn,
-                        &t_grid[i],
-                        &point,
-                        h,
-                        kappa,
-                    )
-                    .components
-                    .iter()
-                    .map(|c| c.result)
-                    .collect();
-                    clear_tape();
-                    vals
+                    aad::no_tape(|| {
+                        einstein_residual(
+                            &g_fn,
+                            &g_inv_fn,
+                            &t_grid[i],
+                            &point,
+                            h,
+                            kappa,
+                        )
+                        .components
+                        .iter()
+                        .map(|c| c.result)
+                        .collect::<Vec<f64>>()
+                    })
                 })
                 .collect()
         };
@@ -418,20 +404,20 @@ pub fn solve_3d(
                     point[2] = iiz as f64 * h;
                     // point[3..] remain 0 (static solution)
 
-                    let vals: Vec<f64> = einstein_residual(
-                        &g_fn,
-                        &g_inv_fn,
-                        &t_grid[fi(iix, iiy, iiz)],
-                        &point,
-                        h,
-                        kappa,
-                    )
-                    .components
-                    .iter()
-                    .map(|c| c.result)
-                    .collect();
-                    clear_tape();
-                    vals
+                    aad::no_tape(|| {
+                        einstein_residual(
+                            &g_fn,
+                            &g_inv_fn,
+                            &t_grid[fi(iix, iiy, iiz)],
+                            &point,
+                            h,
+                            kappa,
+                        )
+                        .components
+                        .iter()
+                        .map(|c| c.result)
+                        .collect::<Vec<f64>>()
+                    })
                 })
                 .collect()
         };
