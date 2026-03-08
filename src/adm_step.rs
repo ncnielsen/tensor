@@ -2,6 +2,7 @@ use aad::number::Number;
 
 use crate::adm::{AdmState, ExtrinsicCurvature};
 use crate::adm_grid::{AdmGrid, FIELDS_PER_PT};
+use crate::adm_matter::{matter_dk_correction, AdmMatter};
 use crate::adm_rhs::adm_rhs_geodesic;
 use crate::christoffel::Christoffel;
 use crate::christoffel_derivative::ChristoffelDerivative;
@@ -256,4 +257,118 @@ pub fn hamiltonian_l2(grid: &AdmGrid) -> f64 {
     } else {
         (sum / count as f64).sqrt()
     }
+}
+
+// ── Source-coupled RHS and RK4 ────────────────────────────────────────────────
+
+/// Compute (∂_t γ_{ij}, ∂_t K_{ij}) at one interior point, including EM matter source.
+///
+/// The vacuum geodesic RHS is augmented with:
+///   ∂_t K_{ij}|_matter = −8π S_{ij} + 4π γ_{ij}(S − ρ)
+fn rhs_at_with_matter(
+    grid: &AdmGrid,
+    ix: usize,
+    iy: usize,
+    iz: usize,
+    matter: &AdmMatter,
+) -> ([f64; 9], [f64; 9]) {
+    aad::no_tape(|| {
+        let gamma_flat = grid.gamma_flat(ix, iy, iz);
+        let k_flat = grid.k_flat(ix, iy, iz);
+
+        let gamma_inv_flat =
+            invert_matrix(&gamma_flat, 3).expect("singular spatial metric in matter RHS");
+        let gamma: Tensor<0, 2> = Tensor::from_f64(3, gamma_flat.to_vec());
+        let gamma_inv: Tensor<2, 0> = Tensor::from_f64(3, gamma_inv_flat);
+
+        let christoffel = christoffel_at(grid, ix, iy, iz);
+        let partial_christoffel = christoffel_deriv_at(grid, ix, iy, iz);
+        let riemann_tensor = riemann(&christoffel, &partial_christoffel);
+        let ricci = ricci_tensor(&riemann_tensor);
+
+        let state = AdmState {
+            gamma: gamma.clone(),
+            k: ExtrinsicCurvature::new(3, k_flat.iter().map(|&v| Number::new(v)).collect()),
+            alpha: 1.0,
+            beta: [0.0; 3],
+        };
+
+        let rhs = adm_rhs_geodesic(&state, &gamma_inv, &ricci);
+
+        let dgamma: [f64; 9] = rhs
+            .dgamma_dt
+            .components
+            .iter()
+            .map(|n| n.result)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+
+        // Add matter correction to dk
+        let dk_vacuum: [f64; 9] = rhs
+            .dk_dt
+            .components
+            .iter()
+            .map(|n| n.result)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let correction = matter_dk_correction(matter, &gamma);
+        let mut dk = dk_vacuum;
+        for i in 0..9 {
+            dk[i] += correction[i];
+        }
+
+        (dgamma, dk)
+    })
+}
+
+/// Compute the full-grid RHS including EM matter sources.
+///
+/// `matters` must have length `grid.n_pts()` with the same flat ordering as the grid.
+/// Boundary entries are zeroed; only interior points `[2..n-2]` are evolved.
+pub fn geodesic_rhs_with_matter(grid: &AdmGrid, matters: &[AdmMatter]) -> Vec<f64> {
+    assert_eq!(
+        matters.len(),
+        grid.n_pts(),
+        "matters must have one entry per grid point"
+    );
+    let mut rhs = vec![0.0_f64; grid.fields.len()];
+
+    for ix in 2..grid.nx.saturating_sub(2) {
+        for iy in 2..grid.ny.saturating_sub(2) {
+            for iz in 2..grid.nz.saturating_sub(2) {
+                let pt = grid.flat_pt(ix, iy, iz);
+                let (dgamma, dk) = rhs_at_with_matter(grid, ix, iy, iz, &matters[pt]);
+                let base = pt * FIELDS_PER_PT;
+                rhs[base..base + 9].copy_from_slice(&dgamma);
+                rhs[base + 9..base + 18].copy_from_slice(&dk);
+            }
+        }
+    }
+
+    rhs
+}
+
+/// RK4 step with prescribed EM matter sources.
+///
+/// `matters` is evaluated once at the current time and held fixed across all
+/// RK4 stages — appropriate for an externally driven source field.
+///
+/// For a self-consistent coupled Maxwell+GR evolution (Phase 4), the source
+/// should be re-evaluated at each stage using the updated metric.
+pub fn adm_step_rk4_with_source(grid: &AdmGrid, dt: f64, matters: &[AdmMatter]) -> AdmGrid {
+    let k1 = geodesic_rhs_with_matter(grid, matters);
+    let g2 = grid.with_rhs(&k1, dt * 0.5);
+    let k2 = geodesic_rhs_with_matter(&g2, matters);
+    let g3 = grid.with_rhs(&k2, dt * 0.5);
+    let k3 = geodesic_rhs_with_matter(&g3, matters);
+    let g4 = grid.with_rhs(&k3, dt);
+    let k4 = geodesic_rhs_with_matter(&g4, matters);
+
+    let mut combined = vec![0.0_f64; grid.fields.len()];
+    for i in 0..combined.len() {
+        combined[i] = (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]) / 6.0;
+    }
+    grid.with_rhs(&combined, dt)
 }

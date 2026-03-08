@@ -10,6 +10,8 @@ pub mod adm;
 pub mod adm_rhs;
 pub mod adm_grid;
 pub mod adm_step;
+pub mod adm_matter;
+pub mod tornado;
 
 pub use tensor::Tensor;
 pub use christoffel::Christoffel;
@@ -32,4 +34,7 @@ pub use ops::em_source::em_t_grid;
 pub use adm::{AdmState, ExtrinsicCurvature};
 pub use adm_rhs::{adm_rhs_geodesic, adm_rhs_vacuum, hamiltonian_constraint, k_squared, momentum_constraint, AdmRhs};
 pub use adm_grid::AdmGrid;
-pub use adm_step::{adm_step_rk4, geodesic_rhs, hamiltonian_l2};
+pub use adm_step::{adm_step_rk4, adm_step_rk4_with_source, geodesic_rhs,
+                   geodesic_rhs_with_matter, hamiltonian_l2};
+pub use adm_matter::{AdmMatter, matter_dk_correction};
+pub use tornado::{EmSource, TornadoArray, tornado_matter_grid};
