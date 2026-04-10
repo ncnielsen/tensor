@@ -95,9 +95,15 @@ Connection coefficients from the metric. Separate type (not a tensor).
 
 - `Christoffel` struct with lower-index symmetry Γ^i_{jk} = Γ^i_{kj}
 - `Christoffel::from_metric(g, g_inv, partial_g)` — the Christoffel formula
-- `partial_g` provided via AAD (function regime), FD (grid regime), or analytic closure (tests)
 - `component(i, j, k)` accessor
 - `from_f64` constructor for testing
+- **Derivatives:** `partial_g` (∂_k g_{μν}) is an input to `from_metric`, computed by
+  the caller using the method appropriate to the regime:
+  - **Function regime:** AAD — metric function is taped, backpropagated
+    for exact ∂_k g_{μν}
+  - **Grid regime:** FD — `partial_gamma_at` computes (γ[i+1]−γ[i−1])/2h
+    from stored grid values (see solver project)
+  - **Tests:** analytic closures for validation against known solutions
 - **Tests:** flat metric → Γ = 0, Schwarzschild Christoffel against known values,
   symmetry Γ^i_{jk} = Γ^i_{kj} holds for arbitrary input
 
@@ -105,121 +111,60 @@ Connection coefficients from the metric. Separate type (not a tensor).
 Tensor differentiation on curved manifolds.
 
 - `covariant_derivative(tensor, partial_deriv, christoffel)` → Tensor<M, N+1>
-- `partial_deriv` is the pre-computed derivative of the tensor (from phase 4: AAD, FD, or analytic)
 - General formula: +Γ per upper index, -Γ per lower index
 - Partial derivative layout convention: derivative direction k appended last
+- **Derivatives:** `partial_deriv` is a pre-computed input, not computed internally.
+  The caller provides it using the appropriate method:
+  - **Function regime:** AAD — tape the tensor-valued function, backpropagate for
+    exact partial derivatives
+  - **Grid regime:** FD — central differences between stored grid values
+  - The covariant derivative itself is purely algebraic (partial + Γ corrections),
+    so it is regime-agnostic
 - **Tests:** covariant derivative of scalar = partial derivative, ∇g = 0 (metric
   compatibility), covariant derivative of vector in flat space = partial derivative
 
 ### Phase 7 — Curvature Tensors
 The full pipeline from Christoffel to Einstein tensor.
 
-- `ChristoffelDerivative` — ∂_k Γ^i_{jl} via AAD (function regime) or FD (grid regime)
+- `ChristoffelDerivative` — ∂_k Γ^i_{jl}
 - `riemann(christoffel, christoffel_deriv)` → Tensor<1,3>
 - `ricci_tensor(riemann, dim)` → Tensor<0,2> (contract Riemann)
 - `ricci_scalar(ricci, g_inv)` → Number (trace)
 - `einstein_tensor(ricci, ricci_scalar, metric)` → Tensor<0,2>
+- **Derivatives:** `ChristoffelDerivative` (∂_k Γ) is an input, computed by the caller:
+  - **Function regime:** AAD — the Christoffel computation is part of the
+    taped pipeline (coords → g → Γ), so ∂_k Γ comes from backpropagation through
+    the full chain. Machine-precision, no step-size tuning.
+  - **Grid regime:** FD — `christoffel_deriv_at` computes (see solver project)
+    (Γ[i+1]−Γ[i−1])/2h from Christoffel values at neighboring grid points,
+    which are themselves computed from FD metric derivatives.
+  - The Riemann → Ricci → Einstein computation is purely algebraic
+    (products and contractions of Γ, ∂Γ, g), so it is regime-agnostic.
 - **Tests:** flat space → all curvature = 0, Schwarzschild Ricci = 0 (vacuum),
   Einstein tensor symmetry, Bianchi identity ∇^μ G_{μν} = 0 (numerical check)
 
-### Phase 8 — Electromagnetic Source
-Faraday tensor and EM stress-energy for the tornado source.
-
-- `faraday(A, point, h)` → Tensor<0,2> — F_{μν} = ∂_μ A_ν - ∂_ν A_μ via AAD or FD
-- `em_stress_energy(F, g, g_inv, mu_0)` → Tensor<0,2>
-- Verify antisymmetry of F, symmetry of T, trace-free T
-- **Tests:** uniform B-field → known T_{μν}, point source E-field, F antisymmetric,
-  T^{EM} trace = 0
-
-### Phase 9 — Einstein Residual + Newton-Raphson Solver
-Root-finding for the field equations. AAD provides Jacobians here.
-
-- `einstein_residual(metric_fn, matter_fn, point, kappa)` — full G-κT pipeline
-  (function-based regime: AAD for all spatial derivatives through the entire
-  g → Γ → ∂Γ → R → G chain, machine-precision curvature)
-- `newton_step(F, x)` — Jacobian via AAD tape end-to-end, Gaussian elimination
-  (coordinates → metric → curvature → residual, all taped, backprop for exact Jacobian)
-- `solve(initial_guess, F, tolerance, max_iter)` → metric solution
-- **Derivative strategy:** the entire residual is a single taped computation graph.
-  No FD needed in this regime — AAD provides both the spatial derivatives inside
-  the residual and the Jacobian of the residual w.r.t. metric unknowns.
-- **Tests:** flat vacuum has zero residual, Newton step on simple F(x)=0 converges,
-  Schwarzschild metric satisfies vacuum residual ≈ 0
-
-### Phase 10 — ADM Types and Evolution Equations
-3+1 decomposition for time evolution.
-
-- `ExtrinsicCurvature` — symmetric K_{ij}, dim=3
-- `AdmState` — (γ_{ij}, K_{ij}, α, β^i)
-- `adm_rhs_geodesic(state)` — ∂_t γ and ∂_t K with α=1, β=0
-- `adm_rhs_vacuum(state)` — full lapse/shift evolution
-- `hamiltonian_constraint(state)` / `momentum_constraint(state)`
-- **Tests:** flat space RHS = 0, constraint satisfaction on known initial data,
-  K evolution sign correctness
-
-### Phase 11 — ADM Grid and Time Stepping
-Spatial grid with RK4 integration.
-
-- `AdmGrid` — flat storage (22 f64/pt), N×N×N, 2-cell boundary band
-- `partial_gamma_at`, `christoffel_at`, `christoffel_deriv_at` — FD on grid
-- `geodesic_rhs(grid)` — full-grid RHS evaluation (wrap in `no_tape`)
-- `adm_step_rk4(grid, dt)` — 4th-order Runge-Kutta step, freeze boundary
-- `hamiltonian_l2(grid)` — L2 norm of constraint violation
-- **Tests:** flat space no drift (100 steps, H ≈ 0), boundary values unchanged,
-  isotropic K evolution matches analytic, RK4 convergence order
-
-### Phase 12 — Matter Coupling and Tornado Source
-EM matter on the ADM grid.
-
-- `AdmMatter` — {ρ, j_i, S_{ij}, S} projections of T_{μν}
-- `AdmMatter::from_t4d(T, γ_inv)` — geodesic-slicing projection
-- `EmSource` — single magnetic Gaussian flux tube
-- `TornadoArray` — circular ring of emitters with rotating activation
-- `tornado_matter_grid(array, grid, t)` — T_{μν} → AdmMatter at all points
-- `adm_step_rk4_with_source(grid, matter, dt)` — matter-coupled evolution
-- **Tests:** single vortex T_{μν} matches analytic, tornado activation rotates,
-  matter-coupled flat space evolves (K grows from source), energy density positive
-
-### Phase 13 — Simulation Runner
-End-to-end tornado simulation with output.
-
-- `TornadoConfig` — grid size, time step, duration, source parameters
-- `TornadoSnapshot` / `TornadoResult` — diagnostics at each step
-- `run_tornado(config)` → TornadoResult (flat IC, RK4 multi-step, snapshots)
-- CSV output, print_summary, peak metric deviation
-- Binary `tornado` with CLI args
-- **Tests:** short run completes without NaN, constraint stays bounded,
-  CSV output parseable, snapshot count matches expected
-
 ### Derivative Strategy Summary
 
-| What | Function regime | Grid regime |
-|------|----------------|-------------|
-| ∂_k g_{μν} | AAD (exact) | FD (O(h²)) |
-| ∂_k Γ^i_{jl} | AAD (exact) | FD (O(h²)) |
-| ∂_μ A_ν | AAD (exact) | FD (O(h²)) |
-| ∂F_i/∂x_j (Jacobian) | AAD (exact) | N/A |
-| Analytic ∂_k f | Closures (test/validation) | N/A |
+| What | Method |
+|------|--------|
+| ∂_k g_{μν} | AAD (exact) — metric function is taped |
+| ∂_k Γ^i_{jl} | AAD (exact) — chain through taped g → Γ pipeline |
+| Analytic ∂_k f | Closures (test/validation only) |
 
-| Regime | Phases | Metric is... | Derivative method |
-|--------|--------|-------------|-------------------|
-| Function-based | 5-9 (solver) | a callable `Fn(&[Number]) -> Tensor` | AAD through computation graph |
-| Grid-based | 10-13 (ADM) | stored f64 values at grid points | FD between neighbors |
+This library provides the **function-based regime**: the metric is a callable
+`Fn(&[Number]) -> Tensor`, and all spatial derivatives come from AAD
+backpropagation through the computation graph. The grid-based regime (FD on
+stored values) is in the solver project.
 
 ### Dependencies
 
 ```
-Phase:  1 → 2 → 3 → 4 → 5 → 6 → 7 → 9
-                          ↓           ↓
-                          ├──→ 8 ───→ 12
-                          ↓
-                         10 → 11 → 12 → 13
+Phase:  1 → 2 → 3 → 4 → 5 → 6 → 7
 ```
 
 - Phase 4 (derivatives) is the foundation for all later computation
 - Phases 1-7 are the math core (tensor algebra + curvature)
-- Phases 8-9 add EM source and solver
-- Phases 10-13 build the ADM evolution + simulation
+- The solver and simulation projects build on this library
 
 ## Decisions
 
