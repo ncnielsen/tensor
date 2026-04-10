@@ -3,7 +3,7 @@ status: active
 created: 2026-04-10
 ---
 
-# Project: Research
+# Project: Tensor Core
 
 ## Goal
 

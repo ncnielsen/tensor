@@ -14,7 +14,7 @@ the end-to-end simulation runner.
 ## Dependencies
 
 Depends on:
-- Tensor library (research project) — core types, operations, curvature pipeline
+- Tensor library (tensor-core project) — core types, operations, curvature pipeline
 - Solver project — ADM types, grid, and time-stepping infrastructure
 
 ## Implementation Plan

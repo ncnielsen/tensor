@@ -12,7 +12,7 @@ Newton-Raphson solver (AAD) and the grid-based ADM 3+1 time evolution (FD).
 
 ## Dependencies
 
-Depends on the tensor library (research project phases 1-7): core tensor type,
+Depends on the tensor library (tensor-core project phases 1-7): core tensor type,
 operations, metric, derivatives, Christoffel, covariant derivative, curvature.
 
 ## Implementation Plan
@@ -103,7 +103,7 @@ Phase:  1
 
 - Phase 1 (NR solver) is independent — function regime, AAD
 - Phases 2-3 (ADM) are grid regime, FD
-- Both depend on the tensor library (research project)
+- Both depend on the tensor library (tensor-core project)
 
 ## Decisions
 
