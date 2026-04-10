@@ -1,7 +1,7 @@
-# Context Engineering — Tensor Library
+# Context Engineering — Tensor Library (Rust)
 
 This directory contains structured context documents for AI-assisted development
-of a tensor library for general relativity simulations.
+of a Rust tensor library for general relativity simulations.
 
 The goal is to provide an AI assistant with precisely the right context at each
 stage of development — not too much (dilutes focus), not too little (causes
@@ -14,7 +14,7 @@ errors and hallucination).
 | `01_domain/` | Mathematical and physics foundations | At project start, or when working on new physics |
 | `02_specifications/` | What to build: requirements, API contracts, type signatures | When starting a new module or feature |
 | `03_architecture/` | How it's structured: layers, modules, data flow | When making design decisions or adding modules |
-| `04_conventions/` | Coding style, testing patterns, naming, error handling | Every session (keep small, always include) |
+| `04_conventions/` | Rust style, testing patterns, performance rules | Every session (keep small, always include) |
 | `05_prompts/` | Reusable task-specific prompts | Pick the one matching the current task |
 | `06_references/` | External resources: papers, prior art, related libraries | When the AI needs deeper background |
 | `07_progress/` | Roadmap, completed milestones, current status | Every session (keep current) |
