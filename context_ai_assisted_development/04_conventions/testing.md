@@ -1,5 +1,39 @@
 # Testing Conventions
 
+## Every Phase Gets Tests
+
+Every phase of a project must have its own test suite before the phase is
+considered complete. Tests are the proof that a phase works. No phase is done
+until its tests pass.
+
+## L0 Tests — Requirements Level
+
+All tests are written at the **requirements level** (L0): they verify observable
+behavior as stated in the specification, not internal implementation details.
+
+Use the **Arrange-Act-Assert** pattern:
+
+```rust
+#[test]
+fn test_contraction_removes_one_upper_and_one_lower_index() {
+    // Arrange — set up inputs matching the spec
+    let t = Tensor::<2, 1>::from_f64(dim, &components);
+
+    // Act — perform the operation under test
+    let result = contract(&t, 0, 0);
+
+    // Assert — verify the requirement is met
+    assert_eq!(result.rank(), (1, 0));
+    assert_abs_diff_eq!(result.component(&[1]), expected, epsilon = 1e-12);
+}
+```
+
+**Rules:**
+- Test the *what* (spec), not the *how* (implementation)
+- Each test targets one requirement or one edge case
+- Test names describe the requirement: `test_<what>_<expected_behavior>`
+- If a test would break from a valid refactor, it's testing implementation — rewrite it
+
 ## Test Location
 
 - Unit tests: `#[cfg(test)] mod tests` at bottom of each source file
