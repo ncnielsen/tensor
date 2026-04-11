@@ -1,14 +1,25 @@
 ---
 status: active
 created: 2026-04-10
+updated: 2026-04-11
 ---
 
 # Project: Tensor Core
 
 ## Goal
 
-Research and evaluate approaches to implementing a tensor library for general
-relativity simulations. Determine the right design choices before writing code.
+Implement a tensor library for general relativity simulations. All arithmetic
+is plain `f64` — derivatives are provided by Enzyme (LLVM-level autodiff via
+Rust nightly `#[autodiff]`), not by a custom `Number` type or tape.
+
+## Toolchain
+
+Requires Rust nightly with Enzyme:
+- `#![feature(autodiff)]` in crate root
+- `RUSTFLAGS="-Zautodiff=Enable"` at build time
+- `lto = "fat"` in `[profile.release]`
+- `libEnzyme-22.so` in sysroot (downloaded from CI artifacts until rustup
+  distributes it — re-download after each `rustup update nightly`)
 
 ## Implementation Plan
 
@@ -16,9 +27,9 @@ relativity simulations. Determine the right design choices before writing code.
 Foundational data structure. Everything else builds on this.
 
 - `Tensor<const M: usize, const N: usize>` — rank (M,N) with const generics
-- Flat `Vec<Number>` storage, row-major, upper indices first
+- Flat `Vec<f64>` storage, row-major, upper indices first
 - `dim` field (e.g., 4 for spacetime, 3 for spatial)
-- `from_f64` / `new` constructors
+- `from_vec` / `new` constructors
 - `component(&[usize])` / `set_component` accessor
 - `flat_index` / `decode_flat_index` encoding/decoding
 - **Tests:** construction, component access, round-trip encode/decode, rank/dimension checks
@@ -43,52 +54,62 @@ The metric tensor and its role in raising/lowering.
 - **Tests:** invert known metrics (Minkowski, Schwarzschild), raise then lower = identity,
   symmetry preserved after inversion
 
-### Phase 4 — Derivative Infrastructure
-Three derivative strategies for different contexts. All later phases consume these.
+### Phase 4 — Derivative Infrastructure (Enzyme)
+Enzyme differentiates compiled LLVM IR — no tape, no `Number` type. Functions
+that compute from `f64` inputs are annotated with `#[autodiff_reverse]` and
+Enzyme generates exact derivative code at the compiler level.
 
-Two regimes with different derivative strategies depending on how the metric
-is represented:
+**How it works in this library:**
 
-**Function-based regime** (solver, analytic metrics, testing):
-The metric is a callable `Fn(&[Number]) -> Tensor` that builds a computation
-graph from coordinate inputs. Derivatives come from:
+The metric is a plain `fn(&[f64]) -> Vec<f64>` (coordinates → flat metric
+components). To get ∂_k g_{μν}, annotate the metric function:
 
-- **AAD autodiff** — pass `Number` coordinates as tape leaves, evaluate the metric
-  function, backpropagate for exact ∂_k g_{μν}. Machine-precision derivatives with
-  no step-size tuning. Same approach chains through Christoffel and curvature —
-  the entire pipeline g → Γ → R → G can be differentiated exactly.
-- **Analytic closures** — hand-coded derivative functions for validation/testing.
-  Used to verify AAD results against known solutions.
+```rust
+#[autodiff_reverse(d_metric_fn, Duplicated, Duplicated)]
+fn metric_fn(coords: &[f64; 4], out: &mut [f64; 16]) { ... }
+```
 
-**Grid-based regime** (ADM evolution):
-The metric γ_{ij} is stored as discrete values at grid points — no computation
-graph connects neighboring points. Derivatives must use:
+Enzyme generates `d_metric_fn` which computes the Jacobian: how each output
+component depends on each input coordinate. This gives exact ∂_k g_{μν}
+with zero step-size tuning — it differentiates the compiled machine code.
 
-- **Finite differences** — central FD between neighboring grid points.
-  Second-order accurate O(h²). The only option for grid-stored data.
-  - `partial_gamma_at(grid, ix, iy, iz, h)` — ∂_k γ_{ij} from grid neighbors
-  - `christoffel_deriv_at(grid, ix, iy, iz, h)` — ∂_k Γ from grid neighbors
+**Two derivative regimes remain, but for different reasons:**
 
-**Shared infrastructure:**
-- `partial_deriv(field_fn, point, h, dim)` — central FD operator, works in both
-  regimes (on functions or grid lookups wrapped as closures)
-- `christoffel_partial_deriv(christoffel_fn, point, h, dim)` — central FD for Christoffel
-- Layout convention: derivative direction k appended as last index
+- **Function regime (solver, analytic metrics, testing):**
+  The metric is a callable function. Enzyme provides exact derivatives by
+  differentiating through the full pipeline (coords → g → Γ → R → G).
+  No finite differences needed anywhere in this chain.
 
-**AAD for solver Jacobians:**
-- Newton-Raphson Jacobian ∂F_i/∂x_j: the metric function is taped end-to-end
-  (coordinates → metric → Christoffel → curvature → residual), then backpropagated
-  to get exact Jacobian columns. No numerical FD Jacobian needed.
-- Sensitivity analysis: how does the solution change with source parameters?
-- ADM grid RHS always runs inside `aad::no_tape` — tape is never used in the
-  time-stepping hot path.
+- **Grid regime (ADM evolution):**
+  The metric γ_{ij} is stored as discrete values at grid points. There is
+  no function connecting neighboring points — Enzyme has nothing to
+  differentiate. Spatial derivatives use central FD: (γ[i+1]−γ[i−1])/2h.
+  This is inherent to grid-based PDE solving, not a limitation of Enzyme.
+
+**What Enzyme replaces:**
+- No `Number` type — all computation is plain `f64`
+- No global tape — no mutex contention, no `no_tape` hack
+- No AAD library dependency
+- Exact derivatives (machine-precision) through arbitrarily deep call chains
+- Zero runtime overhead for code that doesn't need derivatives
+
+**Enzyme annotations used:**
+- `Active` — scalar input/output whose derivative is returned as a value
+- `Duplicated` — slice/array input/output with a shadow buffer for gradients
+- `Const` — input not differentiated (e.g., dimension, flags)
+
+**Jacobian extraction (for Newton-Raphson):**
+For a vector-valued residual `F: R^n → R^n`, compute each Jacobian row by
+seeding the output shadow with a unit vector and calling the generated
+reverse-mode function. n calls give the full Jacobian. (Alternatively,
+forward mode via `#[autodiff_forward]` gives one column per call — choose
+based on n_inputs vs n_outputs.)
 
 **Tests:**
-- AAD spatial derivatives match analytic for Schwarzschild metric
-- FD spatial derivatives match analytic, second-order convergence (halve h, error drops 4x)
-- AAD vs FD agreement within FD truncation error
-- `no_tape` wrapping produces identical primal values to taped evaluation
-- Full pipeline (g → Γ → R → G) differentiable via AAD for simple metrics
+- Enzyme derivatives match analytic for Schwarzschild metric
+- Enzyme vs FD agreement within FD truncation error
+- Deep chain (g → Γ → R → G) differentiable for simple metrics
+- Jacobian of vector function matches FD
 
 ### Phase 5 — Christoffel Symbols
 Connection coefficients from the metric. Separate type (not a tensor).
@@ -96,11 +117,12 @@ Connection coefficients from the metric. Separate type (not a tensor).
 - `Christoffel` struct with lower-index symmetry Γ^i_{jk} = Γ^i_{kj}
 - `Christoffel::from_metric(g, g_inv, partial_g)` — the Christoffel formula
 - `component(i, j, k)` accessor
-- `from_f64` constructor for testing
+- `from_flat` constructor for testing
 - **Derivatives:** `partial_g` (∂_k g_{μν}) is an input to `from_metric`, computed by
   the caller using the method appropriate to the regime:
-  - **Function regime:** AAD — metric function is taped, backpropagated
-    for exact ∂_k g_{μν}
+  - **Function regime:** Enzyme — annotate the metric function with
+    `#[autodiff_reverse]`, call the generated derivative function to get
+    exact ∂_k g_{μν}
   - **Grid regime:** FD — `partial_gamma_at` computes (γ[i+1]−γ[i−1])/2h
     from stored grid values (see solver project)
   - **Tests:** analytic closures for validation against known solutions
@@ -115,8 +137,7 @@ Tensor differentiation on curved manifolds.
 - Partial derivative layout convention: derivative direction k appended last
 - **Derivatives:** `partial_deriv` is a pre-computed input, not computed internally.
   The caller provides it using the appropriate method:
-  - **Function regime:** AAD — tape the tensor-valued function, backpropagate for
-    exact partial derivatives
+  - **Function regime:** Enzyme — differentiate the tensor-valued function
   - **Grid regime:** FD — central differences between stored grid values
   - The covariant derivative itself is purely algebraic (partial + Γ corrections),
     so it is regime-agnostic
@@ -129,15 +150,14 @@ The full pipeline from Christoffel to Einstein tensor.
 - `ChristoffelDerivative` — ∂_k Γ^i_{jl}
 - `riemann(christoffel, christoffel_deriv)` → Tensor<1,3>
 - `ricci_tensor(riemann, dim)` → Tensor<0,2> (contract Riemann)
-- `ricci_scalar(ricci, g_inv)` → Number (trace)
+- `ricci_scalar(ricci, g_inv)` → f64 (trace)
 - `einstein_tensor(ricci, ricci_scalar, metric)` → Tensor<0,2>
 - **Derivatives:** `ChristoffelDerivative` (∂_k Γ) is an input, computed by the caller:
-  - **Function regime:** AAD — the Christoffel computation is part of the
-    taped pipeline (coords → g → Γ), so ∂_k Γ comes from backpropagation through
-    the full chain. Machine-precision, no step-size tuning.
+  - **Function regime:** Enzyme — the entire chain (coords → g → Γ) is a plain
+    `f64` function. Annotate it with `#[autodiff_reverse]` and Enzyme
+    differentiates through the full chain. Machine-precision, no step-size tuning.
   - **Grid regime:** FD — `christoffel_deriv_at` computes (see solver project)
-    (Γ[i+1]−Γ[i−1])/2h from Christoffel values at neighboring grid points,
-    which are themselves computed from FD metric derivatives.
+    (Γ[i+1]−Γ[i−1])/2h from Christoffel values at neighboring grid points.
   - The Riemann → Ricci → Einstein computation is purely algebraic
     (products and contractions of Γ, ∂Γ, g), so it is regime-agnostic.
 - **Tests:** flat space → all curvature = 0, Schwarzschild Ricci = 0 (vacuum),
@@ -145,16 +165,16 @@ The full pipeline from Christoffel to Einstein tensor.
 
 ### Derivative Strategy Summary
 
-| What | Method |
-|------|--------|
-| ∂_k g_{μν} | AAD (exact) — metric function is taped |
-| ∂_k Γ^i_{jl} | AAD (exact) — chain through taped g → Γ pipeline |
-| Analytic ∂_k f | Closures (test/validation only) |
+| What | Function regime | Grid regime |
+|------|----------------|-------------|
+| ∂_k g_{μν} | Enzyme (exact) | FD (O(h²)) |
+| ∂_k Γ^i_{jl} | Enzyme (exact) | FD (O(h²)) |
+| ∂F_i/∂x_j (Jacobian) | Enzyme (exact) | N/A |
 
 This library provides the **function-based regime**: the metric is a callable
-`Fn(&[Number]) -> Tensor`, and all spatial derivatives come from AAD
-backpropagation through the computation graph. The grid-based regime (FD on
-stored values) is in the solver project.
+`fn(&[f64]) -> ...`, and all spatial derivatives come from Enzyme
+differentiation of the compiled code. The grid-based regime (FD on stored
+values) is in the solver project.
 
 ### Dependencies
 
@@ -168,14 +188,19 @@ Phase:  1 → 2 → 3 → 4 → 5 → 6 → 7
 
 ## Decisions
 
-- **Language:** Rust
+- **Language:** Rust (nightly, for `#[autodiff]`)
+- **Autodiff:** Enzyme via `#[autodiff]` — replaces custom AAD library.
+  No `Number` type, no tape, no mutex. Plain `f64` everywhere.
+  Verified working: nightly 1.96.0 (2026-04-10), libEnzyme-22, lto="fat".
+- **Scalar type:** `f64` (not a custom `Number`). Enzyme differentiates
+  compiled code, so the library never needs to know about autodiff.
 
 ## Open Questions
 
-- Generic over scalar type, or concrete f64?
 - Compile-time rank checking vs runtime?
 - Storage format — dense flat array, sparse, or hybrid?
 - How to handle Christoffel (not a tensor) cleanly?
 - Symmetry exploitation — store only independent components, or full + enforce?
-- Autodiff integration — baked in, trait-based, or separate layer?
 - Scope — just tensor algebra, or include solvers/grid/ADM from the start?
+- Enzyme stability — nightly-only, not yet a rustup component. Fallback plan
+  if Enzyme breaks on a future nightly?

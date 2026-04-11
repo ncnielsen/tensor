@@ -1,6 +1,7 @@
 ---
 status: active
 created: 2026-04-11
+updated: 2026-04-11
 ---
 
 # Project: Simulation
@@ -65,7 +66,6 @@ End-to-end tornado simulation with output. **Grid regime — inherits FD from so
 - Binary `tornado` with CLI args
 - **Derivatives:** none taken directly. This phase orchestrates the time-stepping
   loop, calling `adm_step_rk4_with_source` (phase 2) which uses FD internally.
-  All computation runs inside `aad::no_tape`.
 - **Tests:** short run completes without NaN, constraint stays bounded,
   CSV output parseable, snapshot count matches expected
 
