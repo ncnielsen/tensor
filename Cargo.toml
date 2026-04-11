@@ -6,3 +6,6 @@ members = [
 
 [profile.release]
 lto = "fat"
+
+[profile.dev]
+lto = "fat"
