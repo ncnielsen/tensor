@@ -218,14 +218,14 @@ mod tests {
     fn gaussian_elim_3x3() {
         // 2x + y + z = 8
         // 4x + 3y + 3z = 22
-        // -2x + y - z = -3
-        // Solution: x=1, y=2, z=4  (Gaussian elimination standard test)
+        // -2x + y - z = -4
+        // Solution: x=1, y=2, z=4
         let mut a = vec![
             vec![2.0, 1.0, 1.0],
             vec![4.0, 3.0, 3.0],
             vec![-2.0, 1.0, -1.0],
         ];
-        let mut b = vec![8.0, 22.0, -3.0];
+        let mut b = vec![8.0, 22.0, -4.0];
         let x = gaussian_elim(&mut a, &mut b);
         assert!((x[0] - 1.0).abs() < 1e-12, "x[0] = {}", x[0]);
         assert!((x[1] - 2.0).abs() < 1e-12, "x[1] = {}", x[1]);
