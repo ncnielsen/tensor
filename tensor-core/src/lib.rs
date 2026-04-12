@@ -6,3 +6,4 @@ pub mod ops;
 pub mod metric;
 pub mod deriv;
 pub mod christoffel;
+pub mod covariant;
