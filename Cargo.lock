@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "solver"
+version = "0.1.0"
+dependencies = [
+ "tensor-core",
+]
+
+[[package]]
 name = "tensor-core"
 version = "0.1.0"

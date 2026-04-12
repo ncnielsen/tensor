@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "tensor-core",
+    "solver",
 ]
 
 [profile.release]
