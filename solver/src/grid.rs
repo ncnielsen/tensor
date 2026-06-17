@@ -1,4 +1,5 @@
 use crate::adm::{adm_rhs_geodesic, hamiltonian_constraint, AdmState, ExtrinsicCurvature};
+use rayon::prelude::*;
 use tensor_core::{
     christoffel::Christoffel,
     curvature::ChristoffelDerivative,
@@ -156,27 +157,32 @@ impl AdmGrid {
 // ---------------------------------------------------------------------------
 
 /// Central FD of γ in each spatial direction: ∂_k γ_{ij} = (γ[+1] − γ[−1]) / 2h.
+///
+/// Reads the 9 γ components straight from the grid's flat buffer rather than
+/// reconstructing six neighbour `Tensor` objects — γ's `as_slice` layout
+/// (row-major i*DIM+j) matches the grid's `OFF_GAMMA` block exactly.
 fn partial_gamma_at(
     grid: &AdmGrid,
     ix: usize, iy: usize, iz: usize,
 ) -> [Tensor<0, 2>; 3] {
+    let n = grid.n();
     let h2 = 2.0 * grid.h();
+    let raw = grid.raw();
+    // Offset of the γ block at a point in the flat grid buffer.
+    let gbase = |x: usize, y: usize, z: usize| ((x * n + y) * n + z) * FIELDS + OFF_GAMMA;
+
     let mut out = [Tensor::<0, 2>::new(DIM), Tensor::<0, 2>::new(DIM), Tensor::<0, 2>::new(DIM)];
 
-    macro_rules! fd_dir {
-        ($d:expr, $xp:expr, $xm:expr) => {{
-            for i in 0..DIM {
-                for j in 0..DIM {
-                    let v = ($xp.component(&[i, j]) - $xm.component(&[i, j])) / h2;
-                    out[$d].set_component(&[i, j], v);
-                }
-            }
-        }};
-    }
+    let mut fd_dir = |d: usize, pp: usize, pm: usize| {
+        let dst = out[d].as_mut_slice();
+        for c in 0..(DIM * DIM) {
+            dst[c] = (raw[pp + c] - raw[pm + c]) / h2;
+        }
+    };
 
-    fd_dir!(0, grid.gamma(ix + 1, iy, iz), grid.gamma(ix - 1, iy, iz));
-    fd_dir!(1, grid.gamma(ix, iy + 1, iz), grid.gamma(ix, iy - 1, iz));
-    fd_dir!(2, grid.gamma(ix, iy, iz + 1), grid.gamma(ix, iy, iz - 1));
+    fd_dir(0, gbase(ix + 1, iy, iz), gbase(ix - 1, iy, iz));
+    fd_dir(1, gbase(ix, iy + 1, iz), gbase(ix, iy - 1, iz));
+    fd_dir(2, gbase(ix, iy, iz + 1), gbase(ix, iy, iz - 1));
 
     out
 }
@@ -186,8 +192,9 @@ fn christoffel_at(grid: &AdmGrid, ix: usize, iy: usize, iz: usize) -> Christoffe
     let gamma = grid.gamma(ix, iy, iz);
     let gamma_inv = invert_metric(&gamma);
     let pg = partial_gamma_at(grid, ix, iy, iz);
-    let pg_slice: Vec<Tensor<0, 2>> = pg.to_vec();
-    Christoffel::from_metric(&gamma_inv, &pg_slice)
+    // `from_metric` takes `&[Tensor<0,2>]`; the fixed-size array coerces to a
+    // slice directly — no need to clone into a Vec.
+    Christoffel::from_metric(&gamma_inv, &pg)
 }
 
 /// ∂_l Γ^i_{jk} at a grid point via central FD of Christoffel at neighbors.
@@ -218,6 +225,73 @@ fn christoffel_deriv_at(grid: &AdmGrid, ix: usize, iy: usize, iz: usize) -> Chri
 }
 
 // ---------------------------------------------------------------------------
+// Christoffel cache — compute Γ once per point, reuse for center + FD of ∂Γ
+// ---------------------------------------------------------------------------
+
+/// Dense flat index into the Christoffel cache, which covers the cube
+/// `[1, n-1)³` (interior plus the 1-cell halo that FD of ∂Γ reads).
+#[inline]
+fn cache_idx(n: usize, ix: usize, iy: usize, iz: usize) -> usize {
+    let m = n - 2;
+    ((ix - 1) * m + (iy - 1)) * m + (iz - 1)
+}
+
+/// Compute Christoffel symbols once at every point in `[1, n-1)³`.
+///
+/// The old per-point path recomputed `christoffel_at` 7× per interior point
+/// (once for the center, six times inside `christoffel_deriv_at`), and adjacent
+/// points re-derived their shared neighbours. Computing each point once and
+/// reusing it removes that redundancy and the bulk of the heap allocations.
+fn christoffel_cache(grid: &AdmGrid) -> Vec<Christoffel> {
+    let n = grid.n();
+    let m = n - 2;
+    // Points are independent — compute in parallel. Mapping linear → (ix,iy,iz)
+    // matches `cache_idx` order, and `par_iter().collect()` preserves order.
+    (0..m * m * m)
+        .into_par_iter()
+        .map(|idx| {
+            let iz = idx % m + 1;
+            let iy = (idx / m) % m + 1;
+            let ix = idx / (m * m) + 1;
+            christoffel_at(grid, ix, iy, iz)
+        })
+        .collect()
+}
+
+/// ∂_l Γ^i_{jk} via central FD of cached Christoffels (same stencil, same
+/// values as `christoffel_deriv_at` — just no recomputation).
+fn christoffel_deriv_cached(
+    cache: &[Christoffel],
+    n: usize,
+    h: f64,
+    ix: usize, iy: usize, iz: usize,
+) -> ChristoffelDerivative {
+    let h2 = 2.0 * h;
+    let d3 = DIM * DIM * DIM;
+    let d2 = DIM * DIM;
+    let mut data = vec![0.0f64; DIM.pow(4)];
+
+    let directions = [
+        (&cache[cache_idx(n, ix + 1, iy, iz)], &cache[cache_idx(n, ix - 1, iy, iz)], 0usize),
+        (&cache[cache_idx(n, ix, iy + 1, iz)], &cache[cache_idx(n, ix, iy - 1, iz)], 1usize),
+        (&cache[cache_idx(n, ix, iy, iz + 1)], &cache[cache_idx(n, ix, iy, iz - 1)], 2usize),
+    ];
+
+    for (gp, gm, l) in directions {
+        for i in 0..DIM {
+            for j in 0..DIM {
+                for k in 0..DIM {
+                    data[i * d3 + j * d2 + k * DIM + l] =
+                        (gp.component(i, j, k) - gm.component(i, j, k)) / h2;
+                }
+            }
+        }
+    }
+
+    ChristoffelDerivative::from_flat(DIM, data)
+}
+
+// ---------------------------------------------------------------------------
 // Grid-level RHS
 // ---------------------------------------------------------------------------
 
@@ -227,22 +301,45 @@ fn christoffel_deriv_at(grid: &AdmGrid, ix: usize, iy: usize, iz: usize) -> Chri
 /// grid — they do not participate in the evolution.
 fn geodesic_rhs(grid: &AdmGrid) -> AdmGrid {
     let n = grid.n();
-    let mut rhs = AdmGrid::new(n, grid.h());
+    let h = grid.h();
+    let mut rhs = AdmGrid::new(n, h);
 
-    for ix in 2..(n - 2) {
-        for iy in 2..(n - 2) {
-            for iz in 2..(n - 2) {
-                let gamma = grid.gamma(ix, iy, iz);
-                let k = grid.k_tensor(ix, iy, iz);
-                let state = AdmState::new(gamma, k, 1.0, [0.0; 3]);
-                let ch = christoffel_at(grid, ix, iy, iz);
-                let dch = christoffel_deriv_at(grid, ix, iy, iz);
+    // Compute Christoffel once per point in [1, n-1)³; reuse for the center
+    // value and for the FD that gives ∂Γ. Bit-identical to the old per-point
+    // recompute, but without the 7× redundancy.
+    let cache = christoffel_cache(grid);
 
-                let (gd, kd) = adm_rhs_geodesic(&state, &ch, &dch);
-                rhs.set_gamma(ix, iy, iz, &gd);
-                rhs.set_k_tensor(ix, iy, iz, &kd);
-            }
-        }
+    // Interior points are independent: evaluate the RHS in parallel, then write
+    // the results into disjoint blocks of the output grid sequentially.
+    let m = n - 4; // interior cube side: [2, n-2)
+    let results: Vec<(usize, [f64; 9], [f64; 9])> = (0..m * m * m)
+        .into_par_iter()
+        .map(|idx| {
+            let iz = idx % m + 2;
+            let iy = (idx / m) % m + 2;
+            let ix = idx / (m * m) + 2;
+
+            let gamma = grid.gamma(ix, iy, iz);
+            let k = grid.k_tensor(ix, iy, iz);
+            let state = AdmState::new(gamma, k, 1.0, [0.0; 3]);
+            let ch = &cache[cache_idx(n, ix, iy, iz)];
+            let dch = christoffel_deriv_cached(&cache, n, h, ix, iy, iz);
+
+            let (gd, kd) = adm_rhs_geodesic(&state, ch, &dch);
+
+            let base = ((ix * n + iy) * n + iz) * FIELDS;
+            let mut g = [0.0f64; 9];
+            let mut kk = [0.0f64; 9];
+            g.copy_from_slice(gd.as_slice());
+            kk.copy_from_slice(kd.as_slice());
+            (base, g, kk)
+        })
+        .collect();
+
+    let raw = rhs.raw_mut();
+    for (base, g, kk) in results {
+        raw[base + OFF_GAMMA..base + OFF_GAMMA + 9].copy_from_slice(&g);
+        raw[base + OFF_K..base + OFF_K + 9].copy_from_slice(&kk);
     }
 
     rhs
@@ -251,12 +348,13 @@ fn geodesic_rhs(grid: &AdmGrid) -> AdmGrid {
 /// Return a new grid equal to `base + scale * delta` (elementwise on raw data).
 fn scaled_add(base: &AdmGrid, scale: f64, delta: &AdmGrid) -> AdmGrid {
     let mut result = AdmGrid::new(base.n(), base.h());
-    let r = result.raw_mut();
     let b = base.raw();
     let d = delta.raw();
-    for i in 0..r.len() {
-        r[i] = b[i] + scale * d[i];
-    }
+    result
+        .raw_mut()
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, r)| *r = b[i] + scale * d[i]);
     result
 }
 
@@ -279,22 +377,15 @@ pub fn adm_step_rk4(grid: &mut AdmGrid, dt: f64) {
     let y4 = scaled_add(grid, dt, &k3);
     let k4 = geodesic_rhs(&y4);
 
-    let n = grid.n();
-    let raw = grid.raw_mut();
-    for ix in 2..(n - 2) {
-        for iy in 2..(n - 2) {
-            for iz in 2..(n - 2) {
-                let base = ((ix * n + iy) * n + iz) * FIELDS;
-                for f in 0..FIELDS {
-                    raw[base + f] += dt / 6.0
-                        * (k1.raw()[base + f]
-                            + 2.0 * k2.raw()[base + f]
-                            + 2.0 * k3.raw()[base + f]
-                            + k4.raw()[base + f]);
-                }
-            }
-        }
-    }
+    // Combine over the whole raw buffer in parallel. Boundary cells have
+    // k1..k4 = 0 (geodesic_rhs only writes interior), so they stay frozen.
+    let (r1, r2, r3, r4) = (k1.raw(), k2.raw(), k3.raw(), k4.raw());
+    grid.raw_mut()
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, v)| {
+            *v += dt / 6.0 * (r1[i] + 2.0 * r2[i] + 2.0 * r3[i] + r4[i]);
+        });
 }
 
 /// RMS of the Hamiltonian constraint over all interior points.

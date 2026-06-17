@@ -5,3 +5,7 @@ edition = "2024"
 
 [dependencies]
 tensor-core = { path = "../tensor-core" }
+rayon = "1"
+
+[dev-dependencies]
+mimalloc = "0.1"

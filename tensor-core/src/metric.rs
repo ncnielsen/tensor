@@ -20,21 +20,24 @@ pub fn enforce_symmetry(g: &mut Tensor<0, 2>) {
 pub fn invert_metric(g: &Tensor<0, 2>) -> Tensor<2, 0> {
     let dim = g.dim();
 
-    // Augmented matrix [g | I]
-    let mut aug = vec![vec![0.0; 2 * dim]; dim];
+    // Augmented matrix [g | I] stored as a single flat row-major buffer of
+    // `dim` rows × `cols = 2*dim` columns: `aug[row * cols + col]`. One heap
+    // allocation instead of `dim + 1` (Vec-of-Vec), and contiguous for cache.
+    let cols = 2 * dim;
+    let mut aug = vec![0.0; dim * cols];
     for i in 0..dim {
         for j in 0..dim {
-            aug[i][j] = g.component(&[i, j]);
+            aug[i * cols + j] = g.component(&[i, j]);
         }
-        aug[i][dim + i] = 1.0;
+        aug[i * cols + dim + i] = 1.0;
     }
 
     // Forward elimination with partial pivoting
     for col in 0..dim {
         let mut max_row = col;
-        let mut max_val = aug[col][col].abs();
+        let mut max_val = aug[col * cols + col].abs();
         for row in (col + 1)..dim {
-            let val = aug[row][col].abs();
+            let val = aug[row * cols + col].abs();
             if val > max_val {
                 max_val = val;
                 max_row = row;
@@ -43,28 +46,30 @@ pub fn invert_metric(g: &Tensor<0, 2>) -> Tensor<2, 0> {
         assert!(max_val > 1e-14, "singular metric: zero pivot at column {}", col);
 
         if max_row != col {
-            aug.swap(col, max_row);
+            for j in 0..cols {
+                aug.swap(col * cols + j, max_row * cols + j);
+            }
         }
 
-        let pivot = aug[col][col];
+        let pivot = aug[col * cols + col];
         for row in (col + 1)..dim {
-            let factor = aug[row][col] / pivot;
-            for j in col..(2 * dim) {
-                aug[row][j] -= factor * aug[col][j];
+            let factor = aug[row * cols + col] / pivot;
+            for j in col..cols {
+                aug[row * cols + j] -= factor * aug[col * cols + j];
             }
         }
     }
 
     // Back substitution
     for col in (0..dim).rev() {
-        let pivot = aug[col][col];
-        for j in 0..(2 * dim) {
-            aug[col][j] /= pivot;
+        let pivot = aug[col * cols + col];
+        for j in 0..cols {
+            aug[col * cols + j] /= pivot;
         }
         for row in 0..col {
-            let factor = aug[row][col];
-            for j in 0..(2 * dim) {
-                aug[row][j] -= factor * aug[col][j];
+            let factor = aug[row * cols + col];
+            for j in 0..cols {
+                aug[row * cols + j] -= factor * aug[col * cols + j];
             }
         }
     }
@@ -73,7 +78,7 @@ pub fn invert_metric(g: &Tensor<0, 2>) -> Tensor<2, 0> {
     let mut inv = Tensor::<2, 0>::new(dim);
     for i in 0..dim {
         for j in 0..dim {
-            inv.set_component(&[i, j], aug[i][dim + j]);
+            inv.set_component(&[i, j], aug[i * cols + dim + j]);
         }
     }
 
