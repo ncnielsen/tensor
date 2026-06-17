@@ -1,4 +1,7 @@
-use crate::adm::{adm_rhs_geodesic, hamiltonian_constraint, AdmState, ExtrinsicCurvature};
+use crate::adm::{
+    adm_rhs_geodesic, adm_rhs_vacuum, gauge_rhs, hamiltonian_constraint, AdmState,
+    ExtrinsicCurvature, Gauge, GaugeDeriv,
+};
 use rayon::prelude::*;
 use tensor_core::{
     christoffel::Christoffel,
@@ -187,6 +190,137 @@ fn partial_gamma_at(
     out
 }
 
+/// Central FD of K_{ij} in each spatial direction. Same stencil and layout
+/// convention as `partial_gamma_at`: `out[k]` = ∂_k K_{ij} as a `Tensor<0,2>`.
+fn partial_k_at(
+    grid: &AdmGrid,
+    ix: usize, iy: usize, iz: usize,
+) -> [Tensor<0, 2>; 3] {
+    let n = grid.n();
+    let h2 = 2.0 * grid.h();
+    let raw = grid.raw();
+    let kbase = |x: usize, y: usize, z: usize| ((x * n + y) * n + z) * FIELDS + OFF_K;
+
+    let mut out = [Tensor::<0, 2>::new(DIM), Tensor::<0, 2>::new(DIM), Tensor::<0, 2>::new(DIM)];
+
+    let mut fd_dir = |d: usize, pp: usize, pm: usize| {
+        let dst = out[d].as_mut_slice();
+        for c in 0..(DIM * DIM) {
+            dst[c] = (raw[pp + c] - raw[pm + c]) / h2;
+        }
+    };
+
+    fd_dir(0, kbase(ix + 1, iy, iz), kbase(ix - 1, iy, iz));
+    fd_dir(1, kbase(ix, iy + 1, iz), kbase(ix, iy - 1, iz));
+    fd_dir(2, kbase(ix, iy, iz + 1), kbase(ix, iy, iz - 1));
+
+    out
+}
+
+/// Central FD of the lapse α: `out[k]` = ∂_k α.
+fn partial_alpha_at(grid: &AdmGrid, ix: usize, iy: usize, iz: usize) -> [f64; 3] {
+    let n = grid.n();
+    let h2 = 2.0 * grid.h();
+    let raw = grid.raw();
+    let alpha_at = |x: usize, y: usize, z: usize| {
+        raw[((x * n + y) * n + z) * FIELDS + OFF_ALPHA]
+    };
+    [
+        (alpha_at(ix + 1, iy, iz) - alpha_at(ix - 1, iy, iz)) / h2,
+        (alpha_at(ix, iy + 1, iz) - alpha_at(ix, iy - 1, iz)) / h2,
+        (alpha_at(ix, iy, iz + 1) - alpha_at(ix, iy, iz - 1)) / h2,
+    ]
+}
+
+/// Second partials of the lapse: `out[i][j]` = ∂_i ∂_j α.
+///
+/// Diagonal (i==j): standard 3-point stencil, `(α[+1] − 2α[0] + α[−1]) / h²`.
+/// Off-diagonal (i≠j): 4-point cross stencil,
+/// `(α[+,+] − α[+,−] − α[−,+] + α[−,−]) / (4 h²)`.
+///
+/// Symmetric: `out[i][j] == out[j][i]` by construction.
+fn partial2_alpha_at(grid: &AdmGrid, ix: usize, iy: usize, iz: usize) -> [[f64; 3]; 3] {
+    let n = grid.n();
+    let h = grid.h();
+    let h_sq = h * h;
+    let four_h_sq = 4.0 * h_sq;
+    let raw = grid.raw();
+    let alpha_at = |x: usize, y: usize, z: usize| {
+        raw[((x * n + y) * n + z) * FIELDS + OFF_ALPHA]
+    };
+
+    let a000 = alpha_at(ix, iy, iz);
+    let a100 = alpha_at(ix + 1, iy, iz);
+    let a_100 = alpha_at(ix - 1, iy, iz);
+    let a010 = alpha_at(ix, iy + 1, iz);
+    let a0_10 = alpha_at(ix, iy - 1, iz);
+    let a001 = alpha_at(ix, iy, iz + 1);
+    let a00_1 = alpha_at(ix, iy, iz - 1);
+
+    let d_xx = (a100 - 2.0 * a000 + a_100) / h_sq;
+    let d_yy = (a010 - 2.0 * a000 + a0_10) / h_sq;
+    let d_zz = (a001 - 2.0 * a000 + a00_1) / h_sq;
+
+    let a110 = alpha_at(ix + 1, iy + 1, iz);
+    let a1_10 = alpha_at(ix + 1, iy - 1, iz);
+    let a_110 = alpha_at(ix - 1, iy + 1, iz);
+    let a_1_10 = alpha_at(ix - 1, iy - 1, iz);
+    let d_xy = (a110 - a1_10 - a_110 + a_1_10) / four_h_sq;
+
+    let a101 = alpha_at(ix + 1, iy, iz + 1);
+    let a10_1 = alpha_at(ix + 1, iy, iz - 1);
+    let a_101 = alpha_at(ix - 1, iy, iz + 1);
+    let a_10_1 = alpha_at(ix - 1, iy, iz - 1);
+    let d_xz = (a101 - a10_1 - a_101 + a_10_1) / four_h_sq;
+
+    let a011 = alpha_at(ix, iy + 1, iz + 1);
+    let a01_1 = alpha_at(ix, iy + 1, iz - 1);
+    let a0_11 = alpha_at(ix, iy - 1, iz + 1);
+    let a0_1_1 = alpha_at(ix, iy - 1, iz - 1);
+    let d_yz = (a011 - a01_1 - a0_11 + a0_1_1) / four_h_sq;
+
+    [
+        [d_xx, d_xy, d_xz],
+        [d_xy, d_yy, d_yz],
+        [d_xz, d_yz, d_zz],
+    ]
+}
+
+/// Shift Jacobian: `out[k][j]` = ∂_j β^k. Central FD per component per direction.
+fn partial_beta_at(grid: &AdmGrid, ix: usize, iy: usize, iz: usize) -> [[f64; 3]; 3] {
+    let n = grid.n();
+    let h2 = 2.0 * grid.h();
+    let raw = grid.raw();
+    let beta_at = |x: usize, y: usize, z: usize| -> [f64; 3] {
+        let base = ((x * n + y) * n + z) * FIELDS + OFF_BETA;
+        [raw[base], raw[base + 1], raw[base + 2]]
+    };
+
+    let bp_x = beta_at(ix + 1, iy, iz);
+    let bm_x = beta_at(ix - 1, iy, iz);
+    let bp_y = beta_at(ix, iy + 1, iz);
+    let bm_y = beta_at(ix, iy - 1, iz);
+    let bp_z = beta_at(ix, iy, iz + 1);
+    let bm_z = beta_at(ix, iy, iz - 1);
+
+    let mut out = [[0.0f64; 3]; 3];
+    for k in 0..3 {
+        out[k][0] = (bp_x[k] - bm_x[k]) / h2; // ∂_x β^k
+        out[k][1] = (bp_y[k] - bm_y[k]) / h2; // ∂_y β^k
+        out[k][2] = (bp_z[k] - bm_z[k]) / h2; // ∂_z β^k
+    }
+    out
+}
+
+/// Assemble the full `GaugeDeriv` at a grid point via FD on stored α and β.
+fn gauge_deriv_at(grid: &AdmGrid, ix: usize, iy: usize, iz: usize) -> GaugeDeriv {
+    GaugeDeriv {
+        partial_alpha: partial_alpha_at(grid, ix, iy, iz),
+        partial2_alpha: partial2_alpha_at(grid, ix, iy, iz),
+        partial_beta: partial_beta_at(grid, ix, iy, iz),
+    }
+}
+
 /// Christoffel symbols at a grid point from the FD metric derivatives.
 fn christoffel_at(grid: &AdmGrid, ix: usize, iy: usize, iz: usize) -> Christoffel {
     let gamma = grid.gamma(ix, iy, iz);
@@ -345,6 +479,62 @@ fn geodesic_rhs(grid: &AdmGrid) -> AdmGrid {
     rhs
 }
 
+/// Evaluate the general-gauge vacuum ADM RHS at every interior point.
+///
+/// Writes the full 22-field RHS: ∂_t γ_{ij} (9), ∂_t K_{ij} (9), ∂_t α (1),
+/// ∂_t β^i (3). Uses `adm_rhs_vacuum` for the metric/extrinsic-curvature
+/// evolution and `gauge_rhs` for the gauge variables.
+///
+/// Boundary cells are left as zero (frozen).
+fn vacuum_rhs(grid: &AdmGrid, gauge: Gauge) -> AdmGrid {
+    let n = grid.n();
+    let h = grid.h();
+    let mut rhs = AdmGrid::new(n, h);
+
+    let cache = christoffel_cache(grid);
+
+    let m = n - 4; // interior cube side: [2, n-2)
+    let results: Vec<(usize, [f64; FIELDS])> = (0..m * m * m)
+        .into_par_iter()
+        .map(|idx| {
+            let iz = idx % m + 2;
+            let iy = (idx / m) % m + 2;
+            let ix = idx / (m * m) + 2;
+
+            let gamma = grid.gamma(ix, iy, iz);
+            let k = grid.k_tensor(ix, iy, iz);
+            let alpha = grid.alpha_val(ix, iy, iz);
+            let beta = grid.beta_val(ix, iy, iz);
+            let state = AdmState::new(gamma, k, alpha, beta);
+
+            let ch = &cache[cache_idx(n, ix, iy, iz)];
+            let dch = christoffel_deriv_cached(&cache, n, h, ix, iy, iz);
+            let pg = partial_gamma_at(grid, ix, iy, iz);
+            let pk = partial_k_at(grid, ix, iy, iz);
+            let gd = gauge_deriv_at(grid, ix, iy, iz);
+
+            let (gamma_dot, k_dot) = adm_rhs_vacuum(&state, ch, &dch, &pg, &pk, &gd);
+            let (alpha_dot, beta_dot) = gauge_rhs(&state, gauge);
+
+            let base = ((ix * n + iy) * n + iz) * FIELDS;
+            let mut row = [0.0f64; FIELDS];
+            row[..9].copy_from_slice(gamma_dot.as_slice());
+            row[9..18].copy_from_slice(k_dot.as_slice());
+            row[OFF_ALPHA] = alpha_dot;
+            row[OFF_BETA..OFF_BETA + 3].copy_from_slice(&beta_dot);
+
+            (base, row)
+        })
+        .collect();
+
+    let raw = rhs.raw_mut();
+    for (base, row) in results {
+        raw[base..base + FIELDS].copy_from_slice(&row);
+    }
+
+    rhs
+}
+
 /// Return a new grid equal to `base + scale * delta` (elementwise on raw data).
 fn scaled_add(base: &AdmGrid, scale: f64, delta: &AdmGrid) -> AdmGrid {
     let mut result = AdmGrid::new(base.n(), base.h());
@@ -379,6 +569,39 @@ pub fn adm_step_rk4(grid: &mut AdmGrid, dt: f64) {
 
     // Combine over the whole raw buffer in parallel. Boundary cells have
     // k1..k4 = 0 (geodesic_rhs only writes interior), so they stay frozen.
+    let (r1, r2, r3, r4) = (k1.raw(), k2.raw(), k3.raw(), k4.raw());
+    grid.raw_mut()
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, v)| {
+            *v += dt / 6.0 * (r1[i] + 2.0 * r2[i] + 2.0 * r3[i] + r4[i]);
+        });
+}
+
+/// Advance `grid` by one 4th-order Runge-Kutta step of size `dt` using the
+/// given `gauge`.
+///
+/// Evolves all 22 fields per point: γ_{ij}, K_{ij}, α, β^i. The gauge
+/// determines how α and β themselves evolve (see [`Gauge`]); γ and K always
+/// evolve via the full lapse/shift ADM equations (`adm_rhs_vacuum`).
+///
+/// With `Gauge::Geodesic` on a grid initialised to α=1, β=0 everywhere, this
+/// is functionally equivalent to [`adm_step_rk4`] (and bit-identical for the
+/// γ/K components, since the extra Lie/Hessian terms vanish).
+///
+/// Boundary cells are frozen (the 2-cell ghost zone is preserved).
+pub fn adm_step_rk4_with_gauge(grid: &mut AdmGrid, dt: f64, gauge: Gauge) {
+    let k1 = vacuum_rhs(grid, gauge);
+
+    let y2 = scaled_add(grid, dt / 2.0, &k1);
+    let k2 = vacuum_rhs(&y2, gauge);
+
+    let y3 = scaled_add(grid, dt / 2.0, &k2);
+    let k3 = vacuum_rhs(&y3, gauge);
+
+    let y4 = scaled_add(grid, dt, &k3);
+    let k4 = vacuum_rhs(&y4, gauge);
+
     let (r1, r2, r3, r4) = (k1.raw(), k2.raw(), k3.raw(), k4.raw());
     grid.raw_mut()
         .par_iter_mut()
@@ -619,5 +842,252 @@ mod tests {
             "K RK4 convergence: err(dt)={:.2e}, err(dt/2)={:.2e}, ratio={:.1}",
             err1_k, err2_k, err1_k / err2_k
         );
+    }
+
+    // -- Vacuum stepper equivalence: Gauge::Geodesic == adm_step_rk4 ---------
+    //
+    // With α=1, β=0 uniform (init_flat_all), the Lie/Hessian terms in
+    // adm_rhs_vacuum vanish and the gauge_rhs returns 0. The vacuum stepper
+    // must therefore produce bit-identical results to the original geodesic
+    // stepper. This validates that the routing is correct.
+
+    #[test]
+    fn vacuum_geodesic_matches_legacy_stepper() {
+        let mut grid_a = AdmGrid::new(7, 0.1);
+        let mut grid_b = AdmGrid::new(7, 0.1);
+
+        // Same non-trivial IC on both: flat space + isotropic K.
+        let eps = 0.05f64;
+        for grid in [&mut grid_a, &mut grid_b] {
+            grid.init_flat_all();
+            for ix in 0..7 {
+                for iy in 0..7 {
+                    for iz in 0..7 {
+                        let mut k = ExtrinsicCurvature::new(DIM);
+                        for i in 0..DIM { k.set_component(i, i, eps); }
+                        grid.set_k_tensor(ix, iy, iz, &k);
+                    }
+                }
+            }
+        }
+
+        let dt = 1e-3;
+        for _ in 0..5 {
+            adm_step_rk4(&mut grid_a, dt);
+            adm_step_rk4_with_gauge(&mut grid_b, dt, Gauge::Geodesic);
+        }
+
+        // Compare full raw buffers — every byte must match.
+        assert_eq!(
+            grid_a.raw().len(),
+            grid_b.raw().len(),
+            "grid buffer lengths diverged"
+        );
+        for (i, (a, b)) in grid_a.raw().iter().zip(grid_b.raw().iter()).enumerate() {
+            assert!(
+                (a - b).abs() < TOL,
+                "divergence at raw[{}]: geodesic={}, vacuum_geodesic={}",
+                i, a, b
+            );
+        }
+    }
+
+    // -- 1+log at t=0 on uniform isotropic K: analytic ∂_t α -----------------
+    //
+    // γ = I, K = ε I, α = 1, β = 0 (all spatially uniform):
+    //   ∂_t α = -2 α K = -2·1·3ε = -6ε
+    //   ∂_t β = 0
+    //   ∂_t γ_{ij} = -2 α K_{ij} = -2ε δ_{ij}     (matches geodesic since α=1)
+    //   ∂_t K_{ij} = α (R_{ij} + K K_{ij} - 2 K_{im}K^m_j) = ε² δ_{ij}
+    //                (D_i D_j α = 0 since α constant; Lie terms = 0 since β=0)
+    //
+    // Uniform fields → FD gives exact zero spatial derivatives, so the grid
+    // RHS at the interior point matches the point-wise analytic value.
+
+    #[test]
+    fn one_plus_log_rhs_analytic_at_t0() {
+        let eps = 0.1f64;
+        let mut grid = AdmGrid::new(5, 0.1);
+        grid.init_flat_all();
+        for ix in 0..5 {
+            for iy in 0..5 {
+                for iz in 0..5 {
+                    let mut k = ExtrinsicCurvature::new(DIM);
+                    for i in 0..DIM { k.set_component(i, i, eps); }
+                    grid.set_k_tensor(ix, iy, iz, &k);
+                }
+            }
+        }
+
+        let rhs = vacuum_rhs(&grid, Gauge::OnePlusLog);
+
+        // ∂_t α at (2,2,2)
+        let alpha_dot = rhs.alpha_val(2, 2, 2);
+        assert!(
+            (alpha_dot - (-6.0 * eps)).abs() < TOL,
+            "∂_t α = {}, expected -6ε = {}",
+            alpha_dot, -6.0 * eps
+        );
+
+        // ∂_t β = 0
+        let beta_dot = rhs.beta_val(2, 2, 2);
+        for (i, &bd) in beta_dot.iter().enumerate() {
+            assert!(
+                bd.abs() < TOL,
+                "∂_t β[{}] = {}, expected 0", i, bd
+            );
+        }
+
+        // γ_dot and K_dot match the geodesic values (α=1, β=0, no spatial derivs).
+        let gd = rhs.gamma(2, 2, 2);
+        let kd = rhs.k_tensor(2, 2, 2);
+        for i in 0..DIM {
+            for j in 0..DIM {
+                let expected_gd = if i == j { -2.0 * eps } else { 0.0 };
+                let expected_kd = if i == j { eps * eps } else { 0.0 };
+                assert!(
+                    (gd.component(&[i, j]) - expected_gd).abs() < TOL,
+                    "∂_t γ_{}{} = {}, expected {}", i, j, gd.component(&[i, j]), expected_gd
+                );
+                assert!(
+                    (kd.component(i, j) - expected_kd).abs() < TOL,
+                    "∂_t K_{}{} = {}, expected {}", i, j, kd.component(i, j), expected_kd
+                );
+            }
+        }
+    }
+
+    // -- 1+log actually decreases α when K > 0 --------------------------------
+    //
+    // With positive K, 1+log drives α down. After several RK4 steps α at the
+    // interior point must be < 1. Geodesic gauge, by contrast, leaves α = 1.
+
+    #[test]
+    fn one_plus_log_decreases_alpha_in_time() {
+        let eps = 0.05f64;
+        let mut grid = AdmGrid::new(7, 0.1);
+        grid.init_flat_all();
+        for ix in 2..5 {
+            for iy in 2..5 {
+                for iz in 2..5 {
+                    let mut k = ExtrinsicCurvature::new(DIM);
+                    for i in 0..DIM { k.set_component(i, i, eps); }
+                    grid.set_k_tensor(ix, iy, iz, &k);
+                }
+            }
+        }
+
+        let dt = 1e-3;
+        for _ in 0..20 {
+            adm_step_rk4_with_gauge(&mut grid, dt, Gauge::OnePlusLog);
+        }
+
+        let alpha = grid.alpha_val(3, 3, 3);
+        assert!(
+            alpha < 1.0 - 1e-6,
+            "1+log should have decreased α below 1, got α = {}",
+            alpha
+        );
+        assert!(
+            alpha > 0.0,
+            "α should still be positive after this short run, got {}",
+            alpha
+        );
+    }
+
+    // -- 1+log flat space (K=0): α frozen at 1, no drift ---------------------
+    //
+    // With K = 0 everywhere, ∂_t α = -2 α K = 0, so 1+log reduces to the
+    // geodesic behaviour on flat space. No drift over many steps.
+
+    #[test]
+    fn one_plus_log_flat_space_no_drift() {
+        let mut grid = AdmGrid::new(5, 0.1);
+        grid.init_flat_all();
+
+        let h0 = hamiltonian_l2(&grid);
+        assert!(h0.abs() < TOL, "initial H = {} ≠ 0", h0);
+
+        let dt = 1e-4;
+        for _ in 0..100 {
+            adm_step_rk4_with_gauge(&mut grid, dt, Gauge::OnePlusLog);
+        }
+
+        // α still 1 everywhere in the interior.
+        for ix in 2..3 {
+            for iy in 2..3 {
+                for iz in 2..3 {
+                    let alpha = grid.alpha_val(ix, iy, iz);
+                    assert!(
+                        (alpha - 1.0).abs() < TOL,
+                        "α at ({},{},{}) = {}, expected 1.0", ix, iy, iz, alpha
+                    );
+                }
+            }
+        }
+
+        // γ still identity at the interior point.
+        let g = grid.gamma(2, 2, 2);
+        for i in 0..DIM {
+            for j in 0..DIM {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (g.component(&[i, j]) - expected).abs() < TOL,
+                    "γ_{}{} = {}, expected {} after 100 1+log steps",
+                    i, j, g.component(&[i, j]), expected
+                );
+            }
+        }
+
+        let h_final = hamiltonian_l2(&grid);
+        assert!(h_final.abs() < TOL, "final H = {} ≠ 0", h_final);
+    }
+
+    // -- Boundary cells (including α, β) stay frozen under 1+log -------------
+
+    #[test]
+    fn one_plus_log_boundary_cells_unchanged() {
+        let eps = 0.05f64;
+        let mut grid = AdmGrid::new(5, 0.1);
+        grid.init_flat_all();
+        // Give the interior some K so the lapse actually wants to move.
+        for ix in 2..3 {
+            for iy in 2..3 {
+                for iz in 2..3 {
+                    let mut k = ExtrinsicCurvature::new(DIM);
+                    for i in 0..DIM { k.set_component(i, i, eps); }
+                    grid.set_k_tensor(ix, iy, iz, &k);
+                }
+            }
+        }
+
+        let g_before = grid.gamma(0, 0, 0);
+        let k_before = grid.k_tensor(0, 0, 0);
+        let alpha_before = grid.alpha_val(0, 0, 0);
+        let beta_before = grid.beta_val(0, 0, 0);
+
+        adm_step_rk4_with_gauge(&mut grid, 0.01, Gauge::OnePlusLog);
+
+        let g_after = grid.gamma(0, 0, 0);
+        let k_after = grid.k_tensor(0, 0, 0);
+        let alpha_after = grid.alpha_val(0, 0, 0);
+        let beta_after = grid.beta_val(0, 0, 0);
+
+        for i in 0..DIM {
+            for j in 0..DIM {
+                assert_eq!(
+                    g_before.component(&[i, j]), g_after.component(&[i, j]),
+                    "boundary γ_{}{}  changed", i, j
+                );
+                assert_eq!(
+                    k_before.component(i, j), k_after.component(i, j),
+                    "boundary K_{}{}  changed", i, j
+                );
+            }
+        }
+        assert_eq!(alpha_before, alpha_after, "boundary α changed");
+        for i in 0..3 {
+            assert_eq!(beta_before[i], beta_after[i], "boundary β[{}] changed", i);
+        }
     }
 }

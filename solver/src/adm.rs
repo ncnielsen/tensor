@@ -130,6 +130,44 @@ impl GaugeDeriv {
 }
 
 // ---------------------------------------------------------------------------
+// Gauge choice
+// ---------------------------------------------------------------------------
+
+/// Gauge choice for ADM evolution.
+///
+/// Determines the evolution equations for the lapse α and shift β^i. The
+/// spatial metric γ_{ij} and extrinsic curvature K_{ij} always evolve via
+/// `adm_rhs_vacuum`; the gauge just fixes how α and β themselves move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gauge {
+    /// Geodesic slicing: α = 1, β^i = 0 (both frozen).
+    ///
+    /// Equivalent to `adm_rhs_geodesic` when the grid is initialised with
+    /// α = 1, β = 0. Simplest gauge; known to form coordinate singularities
+    /// on non-trivial data.
+    Geodesic,
+    /// 1+log slicing: ∂_t α = −2 α K, β^i frozen.
+    ///
+    /// Singularity-avoiding. Standard first step beyond geodesic; used in
+    /// most production BSSN codes. The lapse collapses near approaching
+    /// singularities (where K → +∞), slowing proper time and preventing
+    /// coordinate blowup.
+    OnePlusLog,
+}
+
+/// Time derivatives of the gauge variables: (∂_t α, ∂_t β^i).
+///
+/// These supplement `adm_rhs_vacuum` (which gives ∂_t γ_{ij} and ∂_t K_{ij})
+/// to form a closed evolution system for the full ADM state.
+pub fn gauge_rhs(state: &AdmState, gauge: Gauge) -> (f64, [f64; 3]) {
+    let k_tr = k_trace(&state.k, &state.gamma_inv);
+    match gauge {
+        Gauge::Geodesic => (0.0, [0.0; 3]),
+        Gauge::OnePlusLog => (-2.0 * state.alpha * k_tr, [0.0; 3]),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -678,5 +716,81 @@ mod tests {
             h,
             expected
         );
+    }
+
+    // -- Gauge RHS ----------------------------------------------------------
+
+    // Geodesic gauge: ∂_t α = 0, ∂_t β = 0 regardless of state.
+
+    #[test]
+    fn gauge_geodesic_freezes_everything() {
+        let dim = 3;
+        let mut gamma = Tensor::<0, 2>::new(dim);
+        for i in 0..dim { gamma.set_component(&[i, i], 1.0); }
+        let mut k = ExtrinsicCurvature::new(dim);
+        for i in 0..dim { k.set_component(i, i, 0.5); }
+        // Non-trivial α and β — geodesic gauge must still freeze them.
+        let state = AdmState::new(gamma, k, 0.7, [0.1, 0.2, 0.3]);
+
+        let (alpha_dot, beta_dot) = gauge_rhs(&state, Gauge::Geodesic);
+        assert!(alpha_dot.abs() < TOL, "geodesic ∂_t α = {} ≠ 0", alpha_dot);
+        for (i, &bd) in beta_dot.iter().enumerate() {
+            assert!(bd.abs() < TOL, "geodesic ∂_t β[{}] = {} ≠ 0", i, bd);
+        }
+    }
+
+    // 1+log gauge: ∂_t α = -2 α K, ∂_t β = 0.
+    //
+    // For isotropic K_{ij} = ε δ_{ij} on flat γ = I: K = tr(K) = 3ε, so
+    // ∂_t α = -2 α · 3ε = -6 α ε. With α=1, ε=0.1: ∂_t α = -0.6.
+
+    #[test]
+    fn gauge_one_plus_log_alpha_rhs_analytic() {
+        let dim = 3;
+        let eps = 0.1f64;
+        let mut gamma = Tensor::<0, 2>::new(dim);
+        for i in 0..dim { gamma.set_component(&[i, i], 1.0); }
+        let mut k = ExtrinsicCurvature::new(dim);
+        for i in 0..dim { k.set_component(i, i, eps); }
+        let state = AdmState::new(gamma, k, 1.0, [0.0; 3]);
+
+        let (alpha_dot, beta_dot) = gauge_rhs(&state, Gauge::OnePlusLog);
+        let expected = -6.0 * eps; // -2 * 1 * 3ε
+        assert!(
+            (alpha_dot - expected).abs() < TOL,
+            "1+log ∂_t α = {}, expected {}", alpha_dot, expected
+        );
+        for (i, &bd) in beta_dot.iter().enumerate() {
+            assert!(bd.abs() < TOL, "1+log ∂_t β[{}] = {} ≠ 0", i, bd);
+        }
+    }
+
+    // 1+log sign: positive K → α decreasing (singularity avoidance).
+
+    #[test]
+    fn gauge_one_plus_log_positive_k_decreases_alpha() {
+        let dim = 3;
+        let mut gamma = Tensor::<0, 2>::new(dim);
+        for i in 0..dim { gamma.set_component(&[i, i], 1.0); }
+        let mut k = ExtrinsicCurvature::new(dim);
+        for i in 0..dim { k.set_component(i, i, 0.1); }
+        let state = AdmState::new(gamma, k, 1.0, [0.0; 3]);
+
+        let (alpha_dot, _) = gauge_rhs(&state, Gauge::OnePlusLog);
+        assert!(alpha_dot < 0.0, "positive K should decrease α, got ∂_t α = {}", alpha_dot);
+    }
+
+    // 1+log with K = 0 (flat space) is a no-op on α — matches geodesic.
+
+    #[test]
+    fn gauge_one_plus_log_flat_space_no_alpha_evolution() {
+        let dim = 3;
+        let mut gamma = Tensor::<0, 2>::new(dim);
+        for i in 0..dim { gamma.set_component(&[i, i], 1.0); }
+        let k = ExtrinsicCurvature::new(dim); // K = 0
+        let state = AdmState::new(gamma, k, 1.0, [0.0; 3]);
+
+        let (alpha_dot, _) = gauge_rhs(&state, Gauge::OnePlusLog);
+        assert!(alpha_dot.abs() < TOL, "K=0 should give ∂_t α = 0, got {}", alpha_dot);
     }
 }
