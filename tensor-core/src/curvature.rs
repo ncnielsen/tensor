@@ -77,6 +77,81 @@ impl ChristoffelDerivative {
         Self { dim, data }
     }
 
+    /// Compute analytically from the metric and its first/second partials.
+    ///
+    /// Uses the chain rule on Γ^i_{jk} = ½ g^{il}(∂_j g_{lk} + ∂_k g_{lj} − ∂_l g_{jk}):
+    ///
+    /// ```text
+    /// ∂_m Γ^i_{jk} = ½ (∂_m g^{il})(∂_j g_{lk} + ∂_k g_{lj} − ∂_l g_{jk})
+    ///              + ½ g^{il} (∂_m∂_j g_{lk} + ∂_m∂_k g_{lj} − ∂_m∂_l g_{jk})
+    /// ```
+    ///
+    /// where ∂_m g^{il} = −g^{ia} g^{lb} ∂_m g_{ab} (inverse-metric derivative
+    /// identity, from differentiating g^{il} g_{lm} = δ^i_m).
+    ///
+    /// This replaces the FD-of-FD approach (`from_fd`) with a single-layer
+    /// derivative: the only discretisation error is in `partial_g` and
+    /// `partial2_g` themselves. With 4th-order stencils for both, ∂Γ is
+    /// 4th-order accurate (vs 2nd-order from `from_fd` with 2nd-order inputs).
+    ///
+    /// - `g_inv`: g^{ij} at the point
+    /// - `partial_g`: `partial_g[m]` = ∂_m g_{ab} (length `dim`)
+    /// - `partial2_g`: `partial2_g[m * dim + n]` = ∂_m ∂_n g_{ab} (length `dim²`,
+    ///   symmetric in m,n but stored full)
+    pub fn from_metric_analytic(
+        g_inv: &Tensor<2, 0>,
+        partial_g: &[Tensor<0, 2>],
+        partial2_g: &[Tensor<0, 2>],
+    ) -> Self {
+        let dim = g_inv.dim();
+        assert_eq!(partial_g.len(), dim, "partial_g must have dim entries");
+        assert_eq!(partial2_g.len(), dim * dim, "partial2_g must have dim² entries");
+
+        let d3 = dim * dim * dim;
+        let d2 = dim * dim;
+        let mut data = vec![0.0; dim.pow(4)];
+
+        let p2 = |m: usize, n: usize, a: usize, b: usize| -> f64 {
+            partial2_g[m * dim + n].component(&[a, b])
+        };
+
+        for i in 0..dim {
+            for j in 0..dim {
+                for k in 0..dim {
+                    for m in 0..dim {
+                        let mut val = 0.0;
+                        for l in 0..dim {
+                            // ∂_m g^{il} = −g^{ia} g^{lb} ∂_m g_{ab}
+                            let mut d_ginv_il = 0.0;
+                            for a in 0..dim {
+                                for b in 0..dim {
+                                    d_ginv_il -= g_inv.component(&[i, a])
+                                        * g_inv.component(&[l, b])
+                                        * partial_g[m].component(&[a, b]);
+                                }
+                            }
+
+                            let bracket1 = partial_g[j].component(&[l, k])
+                                + partial_g[k].component(&[l, j])
+                                - partial_g[l].component(&[j, k]);
+                            let term1 = 0.5 * d_ginv_il * bracket1;
+
+                            let bracket2 = p2(m, j, l, k)
+                                + p2(m, k, l, j)
+                                - p2(m, l, j, k);
+                            let term2 = 0.5 * g_inv.component(&[i, l]) * bracket2;
+
+                            val += term1 + term2;
+                        }
+                        data[i * d3 + j * d2 + k * dim + m] = val;
+                    }
+                }
+            }
+        }
+
+        Self { dim, data }
+    }
+
     pub fn dim(&self) -> usize {
         self.dim
     }
@@ -586,6 +661,152 @@ mod tests {
                 nu,
                 div
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // from_metric_analytic: flat metric → ∂Γ = 0
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn analytic_deriv_flat_metric_zero() {
+        let dim = 4;
+        let mut g_inv = Tensor::<2, 0>::new(dim);
+        g_inv.set_component(&[0, 0], -1.0);
+        for i in 1..dim {
+            g_inv.set_component(&[i, i], 1.0);
+        }
+
+        let zero_g: Vec<Tensor<0, 2>> = (0..dim).map(|_| Tensor::<0, 2>::new(dim)).collect();
+        let zero_g2: Vec<Tensor<0, 2>> =
+            (0..dim * dim).map(|_| Tensor::<0, 2>::new(dim)).collect();
+
+        let dgamma = ChristoffelDerivative::from_metric_analytic(&g_inv, &zero_g, &zero_g2);
+        for &v in dgamma.as_slice() {
+            assert!(v.abs() < TOL, "∂Γ = {} ≠ 0 for flat metric", v);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // from_metric_analytic agrees with from_fd for Schwarzschild
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn analytic_deriv_matches_fd_schwarzschild() {
+        let r = 10.0_f64;
+        let theta = std::f64::consts::FRAC_PI_4;
+        let coords = [0.0, r, theta, 0.0];
+        let dim = 4;
+
+        // g and g_inv via Enzyme-evaluated metric
+        let mut g_flat = [0.0f64; 16];
+        schwarzschild_metric(&coords, &mut g_flat);
+        let g = Tensor::<0, 2>::from_vec(dim, g_flat.to_vec());
+        let g_inv = invert_metric(&g);
+
+        // ∂_m g_{ab} via Enzyme (exact)
+        let jac = jacobian_from_reverse(dim, dim * dim, |i| {
+            let mut dx = [0.0f64; 4];
+            let mut out = [0.0f64; 16];
+            let mut dout = [0.0f64; 16];
+            dout[i] = 1.0;
+            d_schwarzschild(&coords, &mut dx, &mut out, &mut dout);
+            dx.to_vec()
+        });
+        let partial_g = metric_partials_from_jacobian(&jac, dim);
+
+        // ∂_m ∂_n g_{ab} via central FD of the metric function.
+        // Step h_fd must balance truncation O(h²) against roundoff O(ε/h²);
+        // h ~ 1e-3 is near-optimal for f64 second differences.
+        let h_fd = 1e-3_f64;
+        let h_sq = h_fd * h_fd;
+        let eval_metric = |c: &[f64; 4]| -> [f64; 16] {
+            let mut out = [0.0f64; 16];
+            schwarzschild_metric(c, &mut out);
+            out
+        };
+
+        let mut partial2_g: Vec<Tensor<0, 2>> =
+            (0..dim * dim).map(|_| Tensor::<0, 2>::new(dim)).collect();
+
+        for m in 0..dim {
+            for n in 0..dim {
+                if m == n {
+                    let mut cp = coords; cp[m] += h_fd;
+                    let mut cm = coords; cm[m] -= h_fd;
+                    let gp = eval_metric(&cp);
+                    let g0 = eval_metric(&coords);
+                    let gm = eval_metric(&cm);
+                    for a in 0..dim {
+                        for b in 0..dim {
+                            let row = a * dim + b;
+                            partial2_g[m * dim + n].set_component(
+                                &[a, b],
+                                (gp[row] - 2.0 * g0[row] + gm[row]) / h_sq,
+                            );
+                        }
+                    }
+                } else {
+                    let mut cpp = coords; cpp[m] += h_fd; cpp[n] += h_fd;
+                    let mut cpm = coords; cpm[m] += h_fd; cpm[n] -= h_fd;
+                    let mut cmp = coords; cmp[m] -= h_fd; cmp[n] += h_fd;
+                    let mut cmm = coords; cmm[m] -= h_fd; cmm[n] -= h_fd;
+
+                    let gpp = eval_metric(&cpp);
+                    let gpm = eval_metric(&cpm);
+                    let gmp = eval_metric(&cmp);
+                    let gmm = eval_metric(&cmm);
+
+                    for a in 0..dim {
+                        for b in 0..dim {
+                            let row = a * dim + b;
+                            partial2_g[m * dim + n].set_component(
+                                &[a, b],
+                                (gpp[row] - gpm[row] - gmp[row] + gmm[row]) / (4.0 * h_sq),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Analytic ∂Γ
+        let dgamma_analytic =
+            ChristoffelDerivative::from_metric_analytic(&g_inv, &partial_g, &partial2_g);
+
+        // FD ∂Γ (reference)
+        let dgamma_fd = ChristoffelDerivative::from_fd(schwarzschild_christoffel_at, &coords, 1e-5);
+
+        // Both methods use FD for the second-derivative layer, so expect
+        // agreement at the ~1e-6 level (FD truncation + roundoff).
+        for i in 0..dim {
+            for j in 0..dim {
+                for k in 0..dim {
+                    for l in 0..dim {
+                        let a = dgamma_analytic.component(i, j, k, l);
+                        let f = dgamma_fd.component(i, j, k, l);
+                        assert!(
+                            (a - f).abs() < 1e-5,
+                            "∂_{} Γ^{}_{}{}: analytic={}, fd={}, diff={}",
+                            l, i, j, k, a, f, (a - f).abs()
+                        );
+                    }
+                }
+            }
+        }
+
+        // Ricci tensor should vanish (vacuum) using the analytic ∂Γ.
+        let gamma = Christoffel::from_metric(&g_inv, &partial_g);
+        let riem = riemann(&gamma, &dgamma_analytic);
+        let ric = ricci_tensor(&riem);
+        for mu in 0..dim {
+            for nu in 0..dim {
+                assert!(
+                    ric.component(&[mu, nu]).abs() < FD_TOL,
+                    "R_{}{} = {} ≠ 0 (analytic ∂Γ, Schwarzschild vacuum)",
+                    mu, nu, ric.component(&[mu, nu])
+                );
+            }
         }
     }
 }
